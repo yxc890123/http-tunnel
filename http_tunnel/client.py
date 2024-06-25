@@ -1,21 +1,26 @@
-import socket, threading
+import socket, threading, multiprocessing
 
 import http.client, http.cookies
 from requests import Session
 import queue
 
-import os, time
+import sys, os, time
 from .crypto import Crypto_AES, Crypto_RSA
+from .config import Config
 
-settings = {
-    'forward_url': 'http://localhost:8080',
-    'forward_srv': 'localhost:22',
-    'buffer_size': 32768,
-    'queue_size': 10
-}
+settings = Config()
 
 
-def handle_connection(conn: socket.socket, addr, settings=settings):
+def handle_connection(conn: socket.socket, addr, forward_url=None, forward_srv=None, queue_size=None, buffer_size=None):
+    if forward_url is not None:
+        settings.forward_url = forward_url
+    if forward_srv is not None:
+        settings.forward_srv = forward_srv
+    if queue_size is not None:
+        settings.queue_size = queue_size
+    if buffer_size is not None:
+        settings.buffer_size = buffer_size
+
     def close():
         try:
             conn.shutdown(socket.SHUT_RDWR)
@@ -27,7 +32,7 @@ def handle_connection(conn: socket.socket, addr, settings=settings):
     _req = Session()
     try:
         _res = _req.get(
-            f'{settings['forward_url']}/',
+            f'{settings.forward_url}/',
             headers={
                 'cache-control': 'no-cache',
                 'pragma': 'no-cache',
@@ -59,10 +64,10 @@ def handle_connection(conn: socket.socket, addr, settings=settings):
     _pass = os.urandom(190)
     _cookie['secret'] = _rsa.encrypt(_pass)
     _aes = Crypto_AES(_pass)
-    _cookie['token'] = _aes.encrypt(settings['forward_srv'].encode())
+    _cookie['token'] = _aes.encrypt(settings.forward_srv.encode())
     try:
         _res = _req.get(
-            f'{settings['forward_url']}/api/login',
+            f'{settings.forward_url}/api/login',
             headers={
                 'cookie': _cookie.output(header='', sep=';').strip(),
                 'cache-control': 'no-cache',
@@ -90,7 +95,7 @@ def handle_connection(conn: socket.socket, addr, settings=settings):
     _cookie.pop('secret')
     _cookie.pop('token')
 
-    _export_queue = queue.Queue(settings['queue_size'])
+    _export_queue = queue.Queue(settings.queue_size)
     _import_queue = queue.Queue()
 
     _input_thread = threading.Thread(target=handle_input, args=(conn, _import_queue, _export_queue))
@@ -120,7 +125,7 @@ def handle_connection(conn: socket.socket, addr, settings=settings):
     try:
         _cookie['nonce'] = _aes.encrypt(str(time.time()).encode())
         _req.get(
-            f'{settings['forward_url']}/api/logout',
+            f'{settings.forward_url}/api/logout',
             headers={
                 'cookie': _cookie.output(header='', sep=';').strip(),
                 'cache-control': 'no-cache',
@@ -138,7 +143,7 @@ def handle_connection(conn: socket.socket, addr, settings=settings):
 def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
     while True:
         try:
-            _d = conn.recv(settings['buffer_size'])
+            _d = conn.recv(settings.buffer_size)
         except Exception:
             iqueue.put(None)
             break
@@ -187,7 +192,7 @@ def _transfer(
 ):
     try:
         _res = req.get(
-            f'{settings['forward_url']}/api/session',
+            f'{settings.forward_url}/api/session',
             headers=headers
         )
     except Exception as identifier:
@@ -270,7 +275,7 @@ def handle_transfer(
                     _token.append(equeue.get_nowait())
                 except Exception:
                     break
-                if len(_token) >= settings['queue_size']:
+                if len(_token) >= settings.queue_size:
                     break
 
             for _item in _token:
@@ -304,3 +309,38 @@ def handle_transfer(
             )
     equeue.put(None)
     print('[D] Transfer closed, mode:', mode)
+
+
+def client(host, port, forward_url=None, forward_srv=None, queue_size=None, buffer_size=None):
+    print('[I] Starting client mode.')
+    try:
+        _sock = socket.create_server(
+            (host, port),
+            family=socket.AF_INET6,
+            backlog=16,
+            reuse_port=(sys.platform != 'win32'),
+            dualstack_ipv6=True
+        )
+    except Exception:
+        try:
+            _sock = socket.create_server(
+                (host, port),
+                family=socket.AF_INET,
+                backlog=16,
+                reuse_port=(sys.platform != 'win32')
+            )
+        except Exception as identifier:
+            print('[E] Failed to create socket:', identifier)
+            exit(1)
+    print('[I] Listening on:', f'{_sock.getsockname()[0]}:{_sock.getsockname()[1]}')
+    _sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+    while True:
+        conn, addr = _sock.accept()
+        print('[I] Connection accepted:', addr)
+        _child = multiprocessing.Process(target=handle_connection, args=(conn, addr, forward_url, forward_srv, queue_size, buffer_size))
+        _child.start()
+        threading.Thread(target=lambda ps: ps.join(), args=(_child,)).start()

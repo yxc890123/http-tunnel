@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 import sys, os
-import inspect
 import signal
 from getopt import getopt
 
-import socket
-import multiprocessing, threading
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from http_tunnel.client import client
+from http_tunnel.server import server
 
-entry_file = os.path.basename(inspect.stack()[-1].filename)
+exec_file = os.path.basename(sys.argv[0])
 
 help_text = f'''http-tunnel
 
@@ -17,8 +15,8 @@ Socket over HTTP.
 Version: 0.1
 
 Usage:
-    {entry_file} -c [-h HOST] [-p PORT] [-r URL] [-d HOST:PORT] [-b BUFFER] [-q QUEUE]
-    {entry_file} -s [-h HOST] [-p PORT] [-m NUM] [-b BUFFER] [-q QUEUE]
+    {exec_file} -c [-h HOST] [-p PORT] [-r URL] [-d HOST:PORT] [-b BUFFER] [-q QUEUE]
+    {exec_file} -s [-h HOST] [-p PORT] [-m NUM] [-b BUFFER] [-q QUEUE]
 
 Options:
     --help                          Show this message.
@@ -44,68 +42,24 @@ Options:
 
 
 def start_client(**kwargs):
-    from http_tunnel.client import handle_connection, settings
-
-    if 'remote' in kwargs:
-        settings['forward_url'] = kwargs['remote']
-    if 'destination' in kwargs:
-        settings['forward_srv'] = kwargs['destination']
-    if 'buffer' in kwargs:
-        settings['buffer_size'] = kwargs['buffer']
-    if 'queue' in kwargs:
-        settings['queue_size'] = kwargs['queue']
     host = kwargs.get('host', '')
     port = kwargs.get('port', 8080)
+    remote = kwargs.get('remote', None)
+    destination = kwargs.get('destination', None)
+    buffer = kwargs.get('buffer', None)
+    queue = kwargs.get('queue', None)
 
-    print('[I] Starting client mode.')
-    try:
-        _sock = socket.create_server(
-            (host, port),
-            family=socket.AF_INET6,
-            backlog=16,
-            reuse_port=(sys.platform != 'win32'),
-            dualstack_ipv6=True
-        )
-    except Exception:
-        try:
-            _sock = socket.create_server(
-                (host, port),
-                family=socket.AF_INET,
-                backlog=16,
-                reuse_port=(sys.platform != 'win32')
-            )
-        except Exception as identifier:
-            print('[E] Failed to create socket:', identifier)
-            exit(1)
-    print('[I] Listening on:', f'{_sock.getsockname()[0]}:{_sock.getsockname()[1]}')
-    _sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-
-    while True:
-        conn, addr = _sock.accept()
-        print('[I] Connection accepted:', addr)
-        _child = multiprocessing.Process(target=handle_connection, args=(conn, addr, settings))
-        _child.start()
-        threading.Thread(target=lambda ps: ps.join(), args=(_child,)).start()
+    client(host, port, remote, destination, buffer, queue)
 
 
 def start_server(**kwargs):
-    from http_tunnel.server import handle_connection, settings
-
-    if 'max' in kwargs:
-        settings['max_sessions'] = kwargs['max']
-    if 'buffer' in kwargs:
-        settings['buffer_size'] = kwargs['buffer']
-    if 'queue' in kwargs:
-        settings['queue_size'] = kwargs['queue']
     host = kwargs.get('host', '')
     port = kwargs.get('port', 8080)
+    max_sessions = kwargs.get('max', None)
+    buffer = kwargs.get('buffer', None)
+    queue = kwargs.get('queue', None)
 
-    print('[I] Starting server mode.')
-    print('[I] Listening on:', f'{host if host else "<any>"}:{port}')
-    handle_connection(host, port)
+    server(host, port, max_sessions, buffer, queue)
 
 
 def main():

@@ -4,16 +4,13 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
 
 from .crypto import Crypto_AES, Crypto_RSA
+from .config import Config
 
 import uuid
 import queue, socket
 import threading
 
-settings = {
-    'max_sessions': 10,
-    'buffer_size': 32768,
-    'queue_size': 10
-}
+settings = Config()
 
 app = FastAPI(
     title='HTTP Server',
@@ -82,7 +79,7 @@ def login(
             _session.close()
             sessions.pop(_s, None)
 
-    if len(sessions) >= settings['max_sessions']:
+    if len(sessions) >= settings.max_sessions:
         return JSONResponse(
             {'error': 'Too many sessions'},
             status_code=429,
@@ -239,7 +236,7 @@ def session(
         _session.res_tokenid += 1
         _res_tokenid.append(str(_session.res_tokenid))
         _res_token.append(_session.cipher.encrypt(_outq_item))
-        if len(_res_tokenid) >= settings['queue_size']:
+        if len(_res_tokenid) >= settings.queue_size:
             break
 
     # print('[D] sending tokenid:', sid, _res_tokenid)
@@ -312,7 +309,7 @@ class Forwarder(object):
         self.input_thread = None
         self.output_thread = None
         self.iqueue = queue.Queue()
-        self.oqueue = queue.Queue(settings['queue_size'])
+        self.oqueue = queue.Queue(settings.queue_size)
 
     def open(self):
         try:
@@ -364,7 +361,7 @@ class Forwarder(object):
     def handle_output(self):
         while self.sock:
             try:
-                _d = self.sock.recv(settings['buffer_size'])
+                _d = self.sock.recv(settings.buffer_size)
                 # print('[D] recv:', _d)
             except Exception:
                 try:
@@ -379,8 +376,17 @@ class Forwarder(object):
         print('[D] Output closed.')
 
 
-def handle_connection(host, port):
+def server(host, port, max_sessions=None, buffer_size=None, queue_size=None):
+    if max_sessions is not None:
+        settings.max_sessions = max_sessions
+    if buffer_size is not None:
+        settings.buffer_size = buffer_size
+    if queue_size is not None:
+        settings.queue_size = queue_size
+
     rsa.generate()
+    print('[I] Starting server mode.')
+    print('[I] Listening on:', f'{host if host else "<any>"}:{port}')
     print('[I] Public key:')
     print(rsa.public_pem)
     uvicorn.run(
@@ -389,5 +395,5 @@ def handle_connection(host, port):
         port=port,
         timeout_keep_alive=30,
         log_level='error',
-        h11_max_incomplete_event_size=33554432
+        h11_max_incomplete_event_size=33554432  # big enough to handle large cookies
     )
