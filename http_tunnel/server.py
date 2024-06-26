@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
 
 from .crypto import Crypto_AES, Crypto_RSA
-from .config import Config
+from .common import Config, find_packet
 
 import uuid
 import queue, socket
@@ -310,6 +310,7 @@ class Forwarder(object):
         self.output_thread = None
         self.iqueue = queue.Queue()
         self.oqueue = queue.Queue(settings.queue_size)
+        self.reorder_buffer = []
 
     def open(self):
         try:
@@ -336,26 +337,47 @@ class Forwarder(object):
 
     def handle_input(self):
         while self.sock:
-            _item = self.iqueue.get()
-            if _item is not None:
-                if _item[0] != self.tokenid + 1:
-                    print('[W] Request tokenid mismatch:', _item[0], 'expected:', self.tokenid + 1)
-                    self.iqueue.put(_item)
+            _found = False
+            if len(self.reorder_buffer) == 0:
+                _item = self.iqueue.get()
+                if _item is None:
+                    break
+                if _item[0] <= self.tokenid:
+                    print('[W] Received a duplicated packet, ignored.')
                     continue
+                if _item[0] != self.tokenid + 1:
+                    print('[W] Tokenid mismatch:', _item[0], 'expected:', self.tokenid + 1)
+                    self.iqueue.put(_item)
                 else:
-                    self.tokenid = _item[0]
-                    try:
-                        self.sock.sendall(_item[1])
-                    except Exception:
-                        break
-                    if len(_item[1]) == 0:
-                        break
+                    _found = True
             else:
+                for index in range(len(self.reorder_buffer)):
+                    if self.reorder_buffer[index][0] == self.tokenid + 1:
+                        _item = self.reorder_buffer.pop(index)
+                        _found = True
+                        break
+            if not _found:
+                try:
+                    _item = find_packet(self.tokenid + 1, self.iqueue, self.reorder_buffer, settings.queue_size * 2)
+                except queue.Empty:
+                    print('[E] Packet loss: Timed out')
+                    break
+                except Exception as identifier:
+                    print('[E] Packet loss:', identifier)
+                    break
+
+            self.tokenid = _item[0]
+            try:
+                self.sock.sendall(_item[1])
+            except Exception:
+                break
+            if len(_item[1]) == 0:
                 break
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
+        self.sock.close()
         print('[D] Input closed.')
 
     def handle_output(self):
@@ -395,5 +417,5 @@ def server(host, port, max_sessions=None, buffer_size=None, queue_size=None):
         port=port,
         timeout_keep_alive=30,
         log_level='error',
-        h11_max_incomplete_event_size=33554432  # big enough to handle large cookies
+        h11_max_incomplete_event_size=1048576  # big enough to handle large cookies
     )

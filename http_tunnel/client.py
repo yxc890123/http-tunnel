@@ -6,7 +6,7 @@ import queue
 
 import sys, os, time
 from .crypto import Crypto_AES, Crypto_RSA
-from .config import Config
+from .common import Config, find_packet
 
 settings = Config()
 
@@ -146,6 +146,7 @@ def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
             _d = conn.recv(settings.buffer_size)
         except Exception:
             iqueue.put(None)
+            equeue.put(b'')
             break
         # print('[D] Input:', _d)
         equeue.put(_d)
@@ -157,29 +158,51 @@ def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
 
 def handle_output(conn: socket.socket, iqueue: queue.Queue):
     _res_tokenid = 0
+    _reorder_buffer = []
 
     while True:
-        _item = iqueue.get()
-        if _item is not None:
+        _found = False
+        if len(_reorder_buffer) == 0:
+            _item = iqueue.get()
+            if _item is None:
+                break
+            if _item[0] <= _res_tokenid:
+                print('[W] Received a duplicated packet, ignored.')
+                continue
             if _item[0] != _res_tokenid + 1:
                 print('[W] Response tokenid mismatch:', _item[0], 'expected:', _res_tokenid + 1)
-                iqueue.put(_item)
-                continue
+                _reorder_buffer.append(_item)
             else:
-                _res_tokenid = _item[0]
-                try:
-                    # print('[D] Output:', _item)
-                    conn.sendall(_item[1])
-                except Exception:
-                    break
-                if len(_item[1]) == 0:
-                    break
+                _found = True
         else:
+            for index in range(len(_reorder_buffer)):
+                if _reorder_buffer[index][0] == _res_tokenid + 1:
+                    _item = _reorder_buffer.pop(index)
+                    _found = True
+                    break
+        if not _found:
+            try:
+                _item = find_packet(_res_tokenid + 1, iqueue, _reorder_buffer, settings.queue_size * 2)
+            except queue.Empty:
+                print('[E] Response packet loss: Timed out')
+                break
+            except Exception as identifier:
+                print('[E] Response packet loss:', identifier)
+                break
+
+        _res_tokenid = _item[0]
+        try:
+            # print('[D] Output:', _item)
+            conn.sendall(_item[1])
+        except Exception:
+            break
+        if len(_item[1]) == 0:
             break
     try:
         conn.shutdown(socket.SHUT_RDWR)
     except Exception:
         pass
+    conn.close()
     print('[D] Output closed.')
 
 
@@ -227,13 +250,20 @@ def _transfer(
     _token = zip(_res_tokenid.decode().split(' '), _res_token.split(' '))
     for _id, _encrypted in _token:
         try:
+            _id = int(_id)
+        except Exception as identifier:
+            print('[E] Invalid tokenid in response /api/session:', identifier)
+            done.set()
+            iqueue.put(None)
+            return
+        try:
             _d = aes.decrypt(_encrypted)
         except Exception as identifier:
             print('[E] Failed to decrypt token from response /api/session:', identifier)
             done.set()
             iqueue.put(None)
             break
-        iqueue.put((int(_id), _d))
+        iqueue.put((_id, _d))
         if len(_d) == 0:
             done.set()
             break
@@ -336,7 +366,7 @@ def client(host, port, forward_url=None, forward_srv=None, queue_size=None, buff
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
     _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    _sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 2)
 
     while True:
         conn, addr = _sock.accept()

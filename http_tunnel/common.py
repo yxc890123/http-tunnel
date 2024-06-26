@@ -1,0 +1,33 @@
+import queue
+
+
+class Config(object):
+    def __init__(self) -> None:
+        self.forward_url = 'http://localhost:8080'
+        self.forward_srv = 'localhost:22'
+        self.max_sessions = 10
+        self.buffer_size = 32768
+        self.queue_size = 10
+
+
+def find_packet(
+    target_id: int,
+    input_queue: queue.Queue,
+    reorder_buffer: list[tuple[int, bytes]],
+    reorder_limit: int
+):
+    _item = input_queue.get(timeout=10.0)
+    if _item[0] < target_id:
+        print('[W] Received a duplicated packet, ignored.')
+        return find_packet(target_id, input_queue, reorder_buffer, reorder_limit)
+    if _item[0] != target_id:
+        if len(reorder_buffer) >= reorder_limit:
+            print('[D] Reorder queue is full.')
+            raise Exception('Packets offset too big')
+
+        reorder_buffer.append(_item)
+        reorder_buffer.sort(key=lambda i: i[0])
+
+        return find_packet(target_id, input_queue, reorder_buffer, reorder_limit)
+    else:
+        return _item

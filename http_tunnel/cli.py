@@ -4,8 +4,6 @@ import signal
 from getopt import getopt
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from http_tunnel.client import client
-from http_tunnel.server import server
 
 exec_file = os.path.basename(sys.argv[0])
 
@@ -42,6 +40,8 @@ Options:
 
 
 def start_client(**kwargs):
+    from http_tunnel.client import client
+
     host = kwargs.get('host', '')
     port = kwargs.get('port', 8080)
     remote = kwargs.get('remote', None)
@@ -53,6 +53,8 @@ def start_client(**kwargs):
 
 
 def start_server(**kwargs):
+    from http_tunnel.server import server
+
     host = kwargs.get('host', '')
     port = kwargs.get('port', 8080)
     max_sessions = kwargs.get('max', None)
