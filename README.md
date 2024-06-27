@@ -5,33 +5,29 @@ Tunneling all sockets by using regular HTTP requests.
 ## Why
 
 If you always suffered from the limitations of proxy or firewall that cannot be avoided,
-
 then this tool MIGHT be useful for you.
 
 ## How it works
 
 It is a pair of HTTP client/server programs.
-
 The client also acts as a server, capturing all incoming sockets and sending them to the server.
-
 The server then sends the received socket data to the target server.
 
-All data between the client and server is encrypted and wrapped in GET requests.
+All data between the client and server is encrypted and wrapped in HTTP requests.
 
-<br/>
-
-HTTPS is unnecessary since your proxy may block self-signed server certificates,
-
-and even with a formal certificate, it may still decrypt the SSL/TLS layer by using fake certificates,
-
+HTTPS is unnecessary since your proxy may block self-signed server certificates.
+Even with a formal certificate, the proxy may still decrypt the SSL/TLS layer by using fake certificates,
 and the data is encrypted (again, by this tool) anyway.
 
 If there is still any concern, put the server behind the SSL/TLS endpoint.
 
 ## Problems
 
-1. The connection WILL be slow, and may not be stable too.
-2. UDP is not supported (yet).
+The connection WILL be slow, and may not be stable too.
+
+Since HTTP is stateless,
+it's better to use this tool with other "real" tunnel protocols, such as SSH, that maintain consistent connections,
+otherwise, it may consume a lot of TCP sessions, which is not good and might be suspected.
 
 ## Requirements
 
@@ -67,6 +63,14 @@ For more information:
 ```bash
 http-tunnel --help
 ```
+
+## Still working on
+
+1. Support other request methods (default will use GET only).
+   1. POST
+   2. PUT
+   3. WebSockets
+2. Support UDP.
 
 ## As always
 

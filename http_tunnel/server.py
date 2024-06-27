@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Union
 from fastapi import FastAPI, Cookie
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
@@ -29,8 +29,8 @@ def root():
 
 @app.get('/api/login')
 def login(
-    secret: Annotated[str | None, Cookie()] = None,
-    token: Annotated[str | None, Cookie()] = None
+    secret: Union[str, None] = Cookie(default=None),
+    token: Union[str, None] = Cookie(default=None)
 ):
     if not secret or not token:
         return JSONResponse(
@@ -116,10 +116,10 @@ def login(
 
 @app.get('/api/session')
 def session(
-    sid: Annotated[str | None, Cookie()] = None,
-    tokenid: Annotated[str | None, Cookie()] = None,
-    token: Annotated[str | None, Cookie()] = None,
-    nonce: Annotated[str | None, Cookie()] = None
+    sid: Union[str, None] = Cookie(default=None),
+    tokenid: Union[str, None] = Cookie(default=None),
+    token: Union[str, None] = Cookie(default=None),
+    nonce: Union[str, None] = Cookie(default=None)
 ):
     if not sid:
         return JSONResponse(
@@ -256,8 +256,8 @@ def session(
 
 @app.get('/api/logout')
 def logout(
-    sid: Annotated[str | None, Cookie()] = None,
-    nonce: Annotated[str | None, Cookie()] = None
+    sid: Union[str, None] = Cookie(default=None),
+    nonce: Union[str, None] = Cookie(default=None)
 ):
     print('[I] Closing session:', sid)
     if not sid:
