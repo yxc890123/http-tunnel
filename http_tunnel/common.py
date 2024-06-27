@@ -8,6 +8,7 @@ class Config(object):
         self.max_sessions = 10
         self.buffer_size = 32768
         self.queue_size = 10
+        self.reorder_limit = 20
 
 
 def find_packet(
@@ -21,8 +22,8 @@ def find_packet(
         print('[W] Received a duplicated packet, ignored.')
         return find_packet(target_id, input_queue, reorder_buffer, reorder_limit)
     if _item[0] != target_id:
-        if len(reorder_buffer) >= reorder_limit:
-            print('[D] Reorder queue is full.')
+        if len(reorder_buffer) > reorder_limit:
+            print('[D] Reorder queue is full:', [i[0] for i in reorder_buffer])
             raise Exception('Packets offset too big')
 
         reorder_buffer.append(_item)

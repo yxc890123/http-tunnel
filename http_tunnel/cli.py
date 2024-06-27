@@ -10,7 +10,7 @@ exec_file = os.path.basename(sys.argv[0])
 help_text = f'''http-tunnel
 
 Socket over HTTP.
-Version: 0.1
+Version: 0.2
 
 Usage:
     {exec_file} -c [-h HOST] [-p PORT] [-r URL] [-d HOST:PORT] [-b BUFFER] [-q QUEUE]
@@ -36,6 +36,8 @@ Options:
                                     (Find the best number for yourself)
     -q, --queue QUEUE               Maximum packets that are sent to the tunnel at once. [default: 10]
                                     (Find the best number for yourself)
+
+    --reorder-buffer                Maximum packets can be held that were not received in order. [default: 20]
 '''
 
 
@@ -48,8 +50,9 @@ def start_client(**kwargs):
     destination = kwargs.get('destination', None)
     buffer = kwargs.get('buffer', None)
     queue = kwargs.get('queue', None)
+    reorder = kwargs.get('reorder', None)
 
-    client(host, port, remote, destination, buffer, queue)
+    client(host, port, remote, destination, buffer, queue, reorder)
 
 
 def start_server(**kwargs):
@@ -60,8 +63,9 @@ def start_server(**kwargs):
     max_sessions = kwargs.get('max', None)
     buffer = kwargs.get('buffer', None)
     queue = kwargs.get('queue', None)
+    reorder = kwargs.get('reorder', None)
 
-    server(host, port, max_sessions, buffer, queue)
+    server(host, port, max_sessions, buffer, queue, reorder)
 
 
 def main():
@@ -85,7 +89,8 @@ def main():
                 'destination=',
                 'max-sessions=',
                 'buffer=',
-                'queue='
+                'queue=',
+                'reorder-buffer='
             ]
         )
     except Exception as identifier:
@@ -104,30 +109,37 @@ def main():
     _action = ''
     _args = {}
 
-    for opt in opts:
-        if opt[0] in ('-c', '--client'):
-            if not _action:
-                _action = 'client'
-        elif opt[0] in ('-s', '--server'):
-            if not _action:
-                _action = 'server'
-        elif opt[0] in ('-h', '--host'):
-            _args['host'] = opt[1]
-        elif opt[0] in ('-p', '--port'):
-            _args['port'] = int(opt[1])
-        elif opt[0] in ('-r', '--remote'):
-            _args['remote'] = opt[1]
-        elif opt[0] in ('-d', '--destination'):
-            _args['destination'] = opt[1]
-        elif opt[0] in ('-m', '--max-sessions'):
-            _args['max'] = int(opt[1])
-        elif opt[0] in ('-b', '--buffer'):
-            _args['buffer'] = int(opt[1])
-        elif opt[0] in ('-q', '--queue'):
-            _args['queue'] = int(opt[1])
-        elif opt[0] == '--help':
-            print(help_text)
-            exit(0)
+    try:
+        for opt in opts:
+            if opt[0] in ('-c', '--client'):
+                if not _action:
+                    _action = 'client'
+            elif opt[0] in ('-s', '--server'):
+                if not _action:
+                    _action = 'server'
+            elif opt[0] in ('-h', '--host'):
+                _args['host'] = opt[1]
+            elif opt[0] in ('-p', '--port'):
+                _args['port'] = int(opt[1])
+            elif opt[0] in ('-r', '--remote'):
+                _args['remote'] = opt[1]
+            elif opt[0] in ('-d', '--destination'):
+                _args['destination'] = opt[1]
+            elif opt[0] in ('-m', '--max-sessions'):
+                _args['max'] = int(opt[1])
+            elif opt[0] in ('-b', '--buffer'):
+                _args['buffer'] = int(opt[1])
+            elif opt[0] in ('-q', '--queue'):
+                _args['queue'] = int(opt[1])
+            elif opt[0] == '--reorder-buffer':
+                _args['reorder'] = int(opt[1])
+            elif opt[0] == '--help':
+                print(help_text)
+                exit(0)
+    except Exception as identifier:
+        print('[E] Invalid arguments:', identifier, end='\n\n')
+        print(help_text)
+        exit(1)
 
     if not _action:
         print('[E] Invalid arguments: running mode required.', end='\n\n')

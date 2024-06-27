@@ -11,15 +11,17 @@ from .common import Config, find_packet
 settings = Config()
 
 
-def handle_connection(conn: socket.socket, addr, forward_url=None, forward_srv=None, queue_size=None, buffer_size=None):
+def handle_connection(conn: socket.socket, addr, forward_url=None, forward_srv=None, buffer_size=None, queue_size=None, reorder_limit=None):
     if forward_url is not None:
         settings.forward_url = forward_url
     if forward_srv is not None:
         settings.forward_srv = forward_srv
-    if queue_size is not None:
-        settings.queue_size = queue_size
     if buffer_size is not None:
         settings.buffer_size = buffer_size
+    if queue_size is not None:
+        settings.queue_size = queue_size
+    if reorder_limit is not None:
+        settings.reorder_limit = reorder_limit
 
     def close():
         try:
@@ -182,7 +184,7 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
                     break
         if not _found:
             try:
-                _item = find_packet(_res_tokenid + 1, iqueue, _reorder_buffer, settings.queue_size * 2)
+                _item = find_packet(_res_tokenid + 1, iqueue, _reorder_buffer, settings.reorder_limit)
             except queue.Empty:
                 print('[E] Response packet loss: Timed out')
                 break
@@ -199,6 +201,7 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
         if len(_item[1]) == 0:
             break
     try:
+        conn.sendall(b'')
         conn.shutdown(socket.SHUT_RDWR)
     except Exception:
         pass
@@ -247,8 +250,7 @@ def _transfer(
         done.set()
         iqueue.put(None)
         return
-    _token = zip(_res_tokenid.decode().split(' '), _res_token.split(' '))
-    for _id, _encrypted in _token:
+    for _id, _encrypted in zip(_res_tokenid.decode().split(' '), _res_token.split(' ')):
         try:
             _id = int(_id)
         except Exception as identifier:
@@ -341,7 +343,7 @@ def handle_transfer(
     print('[D] Transfer closed, mode:', mode)
 
 
-def client(host, port, forward_url=None, forward_srv=None, queue_size=None, buffer_size=None):
+def client(host, port, forward_url=None, forward_srv=None, buffer_size=None, queue_size=None, reorder_limit=None):
     print('[I] Starting client mode.')
     try:
         _sock = socket.create_server(
@@ -371,6 +373,6 @@ def client(host, port, forward_url=None, forward_srv=None, queue_size=None, buff
     while True:
         conn, addr = _sock.accept()
         print('[I] Connection accepted:', addr)
-        _child = multiprocessing.Process(target=handle_connection, args=(conn, addr, forward_url, forward_srv, queue_size, buffer_size))
+        _child = multiprocessing.Process(target=handle_connection, args=(conn, addr, forward_url, forward_srv, buffer_size, queue_size, reorder_limit))
         _child.start()
         threading.Thread(target=lambda ps: ps.join(), args=(_child,)).start()

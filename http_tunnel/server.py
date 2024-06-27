@@ -358,7 +358,7 @@ class Forwarder(object):
                         break
             if not _found:
                 try:
-                    _item = find_packet(self.tokenid + 1, self.iqueue, self.reorder_buffer, settings.queue_size * 2)
+                    _item = find_packet(self.tokenid + 1, self.iqueue, self.reorder_buffer, settings.reorder_limit)
                 except queue.Empty:
                     print('[E] Packet loss: Timed out')
                     break
@@ -373,11 +373,14 @@ class Forwarder(object):
                 break
             if len(_item[1]) == 0:
                 break
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        self.sock.close()
+        if self.sock:
+            try:
+                self.sock.sendall(b'')
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+        if self.sock:
+            self.sock.close()
         print('[D] Input closed.')
 
     def handle_output(self):
@@ -398,13 +401,15 @@ class Forwarder(object):
         print('[D] Output closed.')
 
 
-def server(host, port, max_sessions=None, buffer_size=None, queue_size=None):
+def server(host, port, max_sessions=None, buffer_size=None, queue_size=None, reorder_limit=None):
     if max_sessions is not None:
         settings.max_sessions = max_sessions
     if buffer_size is not None:
         settings.buffer_size = buffer_size
     if queue_size is not None:
         settings.queue_size = queue_size
+    if reorder_limit is not None:
+        settings.reorder_limit = reorder_limit
 
     rsa.generate()
     print('[I] Starting server mode.')
