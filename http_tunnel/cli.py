@@ -23,13 +23,13 @@ Options:
     -s, --server                    Run as server.
 
     -h, --host HOST                 Listen IP address. [default: any]
-    -p, --port PORT                 Listen port. [default: 8080]
+    -p, --port PORT                 Listen port. [default: 80 on server, 22 on client]
 
-    -r, --remote URL                URL of the remote server. [default: http://localhost:8080]
+    -r, --remote URL                URL of the remote server. [default: http://localhost:80]
                                     (Only used in client mode)
     -d, --destination HOST:PORT     Destination that server will connect to. [default: localhost:22]
                                     (Only used in client mode)
-    -m, --max-sessions NUM          Maximum sessions that server will accept. [default: 10]
+    -m, --max-sessions NUM          Maximum tunnels that server will open at same time. [default: 10]
                                     (Only used in server mode)
 
     -b, --buffer BUFFER             Maximum size in bytes (per packet) that is sent to the tunnel. [default: 32768]
@@ -45,7 +45,7 @@ def start_client(**kwargs):
     from http_tunnel.client import client
 
     host = kwargs.get('host', '')
-    port = kwargs.get('port', 8080)
+    port = kwargs.get('port', 22)
     remote = kwargs.get('remote', None)
     destination = kwargs.get('destination', None)
     buffer = kwargs.get('buffer', None)
@@ -59,7 +59,7 @@ def start_server(**kwargs):
     from http_tunnel.server import server
 
     host = kwargs.get('host', '')
-    port = kwargs.get('port', 8080)
+    port = kwargs.get('port', 80)
     max_sessions = kwargs.get('max', None)
     buffer = kwargs.get('buffer', None)
     queue = kwargs.get('queue', None)

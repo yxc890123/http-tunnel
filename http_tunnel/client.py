@@ -1,6 +1,6 @@
 import socket, threading, multiprocessing
 
-import http.client, http.cookies
+import http.cookies
 from requests import Session
 import queue
 

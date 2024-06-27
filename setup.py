@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='http-tunnel',
-    version='0.2.0',
+    version='0.2.4',
     description='HTTP tunneling tool',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
