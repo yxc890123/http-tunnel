@@ -116,7 +116,7 @@ class Forwarder(object):
                 # print('[D] recv:', _d)
             except Exception:
                 try:
-                    self.oqueue.put_nowait(b'')
+                    self.oqueue.put(b'', timeout=1.0)
                 except Exception:
                     pass
                 break

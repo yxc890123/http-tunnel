@@ -29,7 +29,7 @@ Options:
                                     (Only used in client mode)
     --method METHOD                 HTTP method for sending data to the server. [default: GET]
                                     Available options: GET, POST, PUT, DELETE, PATCH
-                                    (Only used in client mode, Added in version 0.3)
+                                    (Only used in client mode, added in version 0.3)
     -d, --destination HOST:PORT     Destination that server will connect to. [default: localhost:22]
                                     (Only used in client mode)
     -m, --max-sessions NUM          Maximum tunnels that server will open at same time. [default: 10]
