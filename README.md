@@ -67,9 +67,11 @@ http-tunnel --help
 ## Still working on
 
 1. Support other request methods (default will use GET only).
-   1. POST
-   2. PUT
-   3. WebSockets
+   1. ~~POST~~
+   2. ~~PUT~~
+   3. ~~DELETE~~
+   4. ~~PATCH~~
+   5. WebSockets
 2. Support UDP.
 
 ## As always

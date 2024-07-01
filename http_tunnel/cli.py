@@ -10,7 +10,7 @@ exec_file = os.path.basename(sys.argv[0])
 help_text = f'''http-tunnel
 
 Socket over HTTP.
-Version: 0.2
+Version: 0.3
 
 Usage:
     {exec_file} -c [-h HOST] [-p PORT] [-r URL] [-d HOST:PORT] [-b BUFFER] [-q QUEUE]
@@ -27,6 +27,9 @@ Options:
 
     -r, --remote URL                URL of the remote server. [default: http://localhost:80]
                                     (Only used in client mode)
+    --method METHOD                 HTTP method for sending data to the server. [default: GET]
+                                    Available options: GET, POST, PUT, DELETE, PATCH
+                                    (Only used in client mode, Added in version 0.3)
     -d, --destination HOST:PORT     Destination that server will connect to. [default: localhost:22]
                                     (Only used in client mode)
     -m, --max-sessions NUM          Maximum tunnels that server will open at same time. [default: 10]
@@ -38,6 +41,7 @@ Options:
                                     (Find the best number for yourself)
 
     --reorder-buffer                Maximum packets can be held that were not received in order. [default: 20]
+                                    (Added in version 0.2)
 '''
 
 
@@ -47,12 +51,17 @@ def start_client(**kwargs):
     host = kwargs.get('host', '')
     port = kwargs.get('port', 22)
     remote = kwargs.get('remote', None)
+    method = kwargs.get('method', None)
+    if method not in (None, 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'):
+        print('[E] Invalid method.', end='\n\n')
+        print(help_text)
+        exit(1)
     destination = kwargs.get('destination', None)
     buffer = kwargs.get('buffer', None)
     queue = kwargs.get('queue', None)
     reorder = kwargs.get('reorder', None)
 
-    client(host, port, remote, destination, buffer, queue, reorder)
+    client(host, port, remote, method, destination, buffer, queue, reorder)
 
 
 def start_server(**kwargs):
@@ -86,6 +95,7 @@ def main():
                 'host=',
                 'port=',
                 'remote=',
+                'method=',
                 'destination=',
                 'max-sessions=',
                 'buffer=',
@@ -123,6 +133,8 @@ def main():
                 _args['port'] = int(opt[1])
             elif opt[0] in ('-r', '--remote'):
                 _args['remote'] = opt[1]
+            elif opt[0] == '--method':
+                _args['method'] = opt[1].upper()
             elif opt[0] in ('-d', '--destination'):
                 _args['destination'] = opt[1]
             elif opt[0] in ('-m', '--max-sessions'):

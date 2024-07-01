@@ -1,5 +1,5 @@
 from typing import Union
-from fastapi import FastAPI, Cookie
+from fastapi import FastAPI, Cookie, Body
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
 
@@ -22,283 +22,9 @@ sessions = {}
 rsa = Crypto_RSA()
 
 
-@app.get('/')
-def root():
-    return PlainTextResponse(rsa.public_pem, headers={'connection': 'close'})
-
-
-@app.get('/api/login')
-def login(
-    secret: Union[str, None] = Cookie(default=None),
-    token: Union[str, None] = Cookie(default=None)
-):
-    if not secret or not token:
-        return JSONResponse(
-            {'error': 'No secret or token found'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-
-    try:
-        _pass = rsa.decrypt(secret)
-    except Exception as identifier:
-        print('[E] Failed to decrypt secret:', identifier)
-        return JSONResponse(
-            {'error': 'Invalid secret'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-
-    _aes = Crypto_AES(_pass)
-    try:
-        _token = _aes.decrypt(token)
-    except Exception as identifier:
-        print('[E] Failed to decrypt token:', identifier)
-        return JSONResponse(
-            {'error': 'Invalid token'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-
-    try:
-        _token = _token.decode().split(':')
-        _host = _token[0]
-        _port = int(_token[1])
-    except Exception as identifier:
-        print('[D] Invalid host/port in token:', identifier)
-        return JSONResponse(
-            {'error': 'Invalid token'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-
-    for _s in list(sessions.keys()):
-        _session: Forwarder = sessions[_s]
-        _t: threading.Thread = _session.output_thread
-        if not _t.is_alive():
-            _session.close()
-            sessions.pop(_s, None)
-
-    if len(sessions) >= settings.max_sessions:
-        return JSONResponse(
-            {'error': 'Too many sessions'},
-            status_code=429,
-            headers={'connection': 'close'}
-        )
-
-    _id = str(uuid.uuid4())
-    while _id in sessions:
-        _id = str(uuid.uuid4())
-
-    _session = Forwarder(_host, _port)
-    _session.open()
-    if _session.sock:
-        print('[I] Session opened:', _id, _host, _port)
-        _session.cipher = _aes
-        _session.input_thread = threading.Thread(target=_session.handle_input)
-        _session.input_thread.start()
-        _session.output_thread = threading.Thread(target=_session.handle_output)
-        _session.output_thread.start()
-        sessions[_id] = _session
-        _res = JSONResponse(
-            {'error': None},
-            headers={'connection': 'keep-alive'}
-        )
-        _res.set_cookie(key='sid', value=_id, path='/api/')
-        return _res
-    else:
-        return JSONResponse(
-            {'error': 'Failed to connect to server'},
-            status_code=503,
-            headers={'connection': 'close'}
-        )
-
-
-@app.get('/api/session')
-def session(
-    sid: Union[str, None] = Cookie(default=None),
-    tokenid: Union[str, None] = Cookie(default=None),
-    token: Union[str, None] = Cookie(default=None),
-    nonce: Union[str, None] = Cookie(default=None)
-):
-    if not sid:
-        return JSONResponse(
-            {'error': 'No session ID found'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-    if type(tokenid) is not type(token):
-        return JSONResponse(
-            {'error': 'Invalid token'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-    if sid not in sessions:
-        return JSONResponse(
-            {'error': 'Session ID not found'},
-            status_code=404,
-            headers={'connection': 'close'}
-        )
-
-    _session: Forwarder = sessions[sid]
-    try:
-        _nonce = float(_session.cipher.decrypt(nonce))
-    except Exception as identifier:
-        print('[E] Failed to decrypt nonce:', identifier)
-        return JSONResponse(
-            {'error': 'Invalid nonce'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-
-    _timeout = 10.0
-    if tokenid is not None:
-        if _nonce <= _session.put_nonce:
-            print('[E] Received duplicated nonce.')
-            return JSONResponse(
-                {'error': 'Duplicated nonce'},
-                status_code=403,
-                headers={'connection': 'close'}
-            )
-        else:
-            _session.put_nonce = _nonce
-
-        try:
-            tokenid = _session.cipher.decrypt(tokenid)
-        except Exception as identifier:
-            print('[E] Failed to decrypt tokenid:', identifier)
-            return JSONResponse(
-                {'error': 'Invalid tokenid'},
-                status_code=400,
-                headers={'connection': 'close'}
-            )
-
-        # print('[D] received tokenid:', tokenid)
-        _timeout = 0.02
-
-        for _id, _encrypted in zip(tokenid.decode().split(' '), token.split(' ')):
-            try:
-                _t = _session.cipher.decrypt(_encrypted)
-            except Exception as identifier:
-                print('[E] Failed to decrypt token:', identifier)
-                return JSONResponse(
-                    {'error': 'Invalid token'},
-                    status_code=400,
-                    headers={'connection': 'close'}
-                )
-            _session.iqueue.put((int(_id), _t))
-            if not _session.sock:
-                return JSONResponse(
-                    {'error': 'Session closed'},
-                    status_code=409,
-                    headers={'connection': 'close'}
-                )
-            if len(_t) == 0:
-                _session.close()
-                sessions.pop(sid, None)
-                break
-    else:
-        if _nonce <= _session.get_nonce:
-            print('[E] Received duplicated nonce.')
-            return JSONResponse(
-                {'error': 'Duplicated nonce'},
-                status_code=403,
-                headers={'connection': 'close'}
-            )
-        else:
-            _session.get_nonce = _nonce
-
-    try:
-        _outq_item = _session.oqueue.get(timeout=_timeout)
-    except Exception:
-        if not _session.sock:
-            return JSONResponse(
-                {'error': 'Session closed'},
-                status_code=409,
-                headers={'connection': 'close'}
-            )
-        _res = JSONResponse(
-            {'error': None},
-            status_code=202,
-            headers={'connection': 'keep-alive'}
-        )
-        _res.set_cookie(key='sid', value=sid, path='/api/')
-        return _res
-
-    _session.res_tokenid += 1
-    _res_tokenid = [str(_session.res_tokenid)]
-    _res_token = [_session.cipher.encrypt(_outq_item)]
-    while not _session.oqueue.empty():
-        try:
-            _outq_item = _session.oqueue.get_nowait()
-        except Exception:
-            break
-        _session.res_tokenid += 1
-        _res_tokenid.append(str(_session.res_tokenid))
-        _res_token.append(_session.cipher.encrypt(_outq_item))
-        if len(_res_tokenid) >= settings.queue_size:
-            break
-
-    # print('[D] sending tokenid:', sid, _res_tokenid)
-    _res = JSONResponse(
-        {
-            'error': None,
-            'tokenid': _session.cipher.encrypt(' '.join(_res_tokenid).encode()),
-            'token': ' '.join(_res_token)
-        },
-        headers={'connection': 'keep-alive'}
-    )
-    _res.set_cookie(key='sid', value=sid, path='/api/')
-    # _res.set_cookie(key='tokenid', value=_session.cipher.encrypt(' '.join(_res_tokenid)), path='/api/')
-    # _res.set_cookie(key='token', value=' '.join(_res_token), path='/api/')
-    return _res
-
-
-@app.get('/api/logout')
-def logout(
-    sid: Union[str, None] = Cookie(default=None),
-    nonce: Union[str, None] = Cookie(default=None)
-):
-    print('[I] Closing session:', sid)
-    if not sid:
-        return JSONResponse(
-            {'error': 'No session ID found'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-    if sid not in sessions:
-        return JSONResponse(
-            {'error': 'Session ID not found'},
-            status_code=404,
-            headers={'connection': 'close'}
-        )
-
-    _session: Forwarder = sessions[sid]
-    try:
-        _nonce = float(_session.cipher.decrypt(nonce))
-    except Exception as identifier:
-        print('[E] Failed to decrypt nonce:', identifier)
-        return JSONResponse(
-            {'error': 'Invalid nonce'},
-            status_code=400,
-            headers={'connection': 'close'}
-        )
-    if _nonce <= _session.put_nonce or _nonce <= _session.get_nonce:
-        print('[E] Received duplicated nonce.')
-        return JSONResponse(
-            {'error': 'Duplicated nonce'},
-            status_code=403,
-            headers={'connection': 'close'}
-        )
-
-    _session.close()
-    sessions.pop(sid, None)
-    return JSONResponse({'error': None}, headers={'connection': 'close'})
-
-
 class Forwarder(object):
     def __init__(self, host: str, port: int) -> None:
-        self.cipher = None
+        self.cipher: Crypto_AES = None
         self.get_nonce = 0.0
         self.put_nonce = 0.0
         self.host = host
@@ -399,6 +125,326 @@ class Forwarder(object):
                 break
         self.iqueue.put(None)
         print('[D] Output closed.')
+
+
+@app.get('/')
+def root():
+    return PlainTextResponse(rsa.public_pem, headers={'connection': 'close'})
+
+
+@app.get('/api/login')
+def login(
+    secret: str = Cookie(default=...),
+    token: str = Cookie(default=...)
+):
+    try:
+        _pass = rsa.decrypt(secret)
+    except Exception as identifier:
+        print('[E] Failed to decrypt secret:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid secret'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    _aes = Crypto_AES(_pass)
+    try:
+        _forward_srv = _aes.decrypt(token)
+    except Exception as identifier:
+        print('[E] Failed to decrypt token:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid token'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    try:
+        _forward_srv = _forward_srv.decode().split(':')
+        _host = _forward_srv[0]
+        _port = int(_forward_srv[1])
+    except Exception as identifier:
+        print('[D] Invalid host/port in token:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid token'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    for _s in list(sessions.keys()):
+        _session: Forwarder = sessions[_s]
+        _t: threading.Thread = _session.output_thread
+        if not _t.is_alive():
+            _session.close()
+            sessions.pop(_s, None)
+
+    if len(sessions) >= settings.max_sessions:
+        return JSONResponse(
+            {'error': 'Too many sessions'},
+            status_code=429,
+            headers={'connection': 'close'}
+        )
+
+    _id = str(uuid.uuid4())
+    while _id in sessions:
+        _id = str(uuid.uuid4())
+
+    _session = Forwarder(_host, _port)
+    _session.open()
+    if _session.sock:
+        print('[I] Session opened:', _id, _host, _port)
+        _session.cipher = _aes
+        _session.input_thread = threading.Thread(target=_session.handle_input)
+        _session.input_thread.start()
+        _session.output_thread = threading.Thread(target=_session.handle_output)
+        _session.output_thread.start()
+        sessions[_id] = _session
+        _res = JSONResponse(
+            {'error': None},
+            headers={'connection': 'keep-alive'}
+        )
+        _res.set_cookie(key='sid', value=_id, path='/api/')
+        return _res
+    else:
+        return JSONResponse(
+            {'error': 'Failed to connect to server'},
+            status_code=503,
+            headers={'connection': 'close'}
+        )
+
+
+def put_iqueue(session: Forwarder, tokenid, token):
+    try:
+        tokenid = session.cipher.decrypt(tokenid)
+    except Exception as identifier:
+        print('[E] Failed to decrypt tokenid:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid tokenid'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    # print('[D] received tokenid:', tokenid)
+    for _id, _encrypted_token in zip(tokenid.decode().split(' '), token.split(' ')):
+        try:
+            _id = int(_id)
+        except Exception as identifier:
+            print('[E] Invalid tokenid in request:', identifier)
+            return JSONResponse(
+                {'error': 'Invalid token id'},
+                status_code=400,
+                headers={'connection': 'close'}
+            )
+        try:
+            _token = session.cipher.decrypt(_encrypted_token)
+        except Exception as identifier:
+            print('[E] Failed to decrypt token:', identifier)
+            return JSONResponse(
+                {'error': 'Invalid token'},
+                status_code=400,
+                headers={'connection': 'close'}
+            )
+        session.iqueue.put((int(_id), _token))
+        if not session.sock:
+            return JSONResponse(
+                {'error': 'Session closed'},
+                status_code=409,
+                headers={'connection': 'close'}
+            )
+        if len(_token) == 0:
+            session.close()
+            break
+
+
+def get_oqueue(session: Forwarder, sid, timeout):
+    try:
+        _outq_item = session.oqueue.get(timeout=timeout)
+    except Exception:
+        if not session.sock:
+            return JSONResponse(
+                {'error': 'Session closed'},
+                status_code=409,
+                headers={'connection': 'close'}
+            )
+        _res = JSONResponse(
+            {'error': None},
+            status_code=202,
+            headers={'connection': 'keep-alive'}
+        )
+        _res.set_cookie(key='sid', value=sid, path='/api/')
+        return _res
+
+    session.res_tokenid += 1
+    _res_tokenid = [str(session.res_tokenid)]
+    _res_token = [session.cipher.encrypt(_outq_item)]
+    while not session.oqueue.empty():
+        try:
+            _outq_item = session.oqueue.get_nowait()
+        except Exception:
+            break
+        session.res_tokenid += 1
+        _res_tokenid.append(str(session.res_tokenid))
+        _res_token.append(session.cipher.encrypt(_outq_item))
+        if len(_res_tokenid) >= settings.queue_size:
+            break
+
+    # print('[D] sending tokenid:', sid, _res_tokenid)
+    _res = JSONResponse(
+        {
+            'error': None,
+            'tokenid': session.cipher.encrypt(' '.join(_res_tokenid).encode()),
+            'token': ' '.join(_res_token)
+        },
+        headers={'connection': 'keep-alive'}
+    )
+    _res.set_cookie(key='sid', value=sid, path='/api/')
+    # _res.set_cookie(key='tokenid', value=session.cipher.encrypt(' '.join(_res_tokenid)), path='/api/')
+    # _res.set_cookie(key='token', value=' '.join(_res_token), path='/api/')
+    return _res
+
+
+@app.get('/api/session')
+def session(
+    sid: str = Cookie(default=...),
+    nonce: str = Cookie(default=...),
+    tokenid: Union[str, None] = Cookie(default=None),
+    token: Union[str, None] = Cookie(default=None)
+):
+    if sid not in sessions:
+        return JSONResponse(
+            {'error': 'Session ID not found'},
+            status_code=404,
+            headers={'connection': 'close'}
+        )
+    if type(tokenid) is not type(token):
+        return JSONResponse(
+            {'error': 'Invalid token'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    _session: Forwarder = sessions[sid]
+    try:
+        _nonce = float(_session.cipher.decrypt(nonce))
+    except Exception as identifier:
+        print('[E] Failed to decrypt nonce:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid nonce'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    _timeout = 10.0
+    if tokenid is not None:
+        if _nonce <= _session.put_nonce:
+            print('[E] Received duplicated nonce.')
+            return JSONResponse(
+                {'error': 'Duplicated nonce'},
+                status_code=403,
+                headers={'connection': 'close'}
+            )
+        else:
+            _session.put_nonce = _nonce
+
+        _timeout = 0.02
+
+        _res = put_iqueue(_session, tokenid, token)
+        if _res is not None:
+            return _res
+
+    else:
+        if _nonce <= _session.get_nonce:
+            print('[E] Received duplicated nonce.')
+            return JSONResponse(
+                {'error': 'Duplicated nonce'},
+                status_code=403,
+                headers={'connection': 'close'}
+            )
+        else:
+            _session.get_nonce = _nonce
+
+    return get_oqueue(_session, sid, _timeout)
+
+
+@app.post('/api/session')
+@app.put('/api/session')
+@app.delete('/api/session')
+@app.patch('/api/session')
+# content-type: application/json required
+def session_with_body(
+    sid: str = Cookie(default=...),
+    nonce: str = Cookie(default=...),
+    tokenid: str = Body(default=...),
+    token: str = Body(default=...)
+):
+    if sid not in sessions:
+        return JSONResponse(
+            {'error': 'Session ID not found'},
+            status_code=404,
+            headers={'connection': 'close'}
+        )
+
+    _session: Forwarder = sessions[sid]
+    try:
+        _nonce = float(_session.cipher.decrypt(nonce))
+    except Exception as identifier:
+        print('[E] Failed to decrypt nonce:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid nonce'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    if _nonce <= _session.put_nonce:
+        print('[E] Received duplicated nonce.')
+        return JSONResponse(
+            {'error': 'Duplicated nonce'},
+            status_code=403,
+            headers={'connection': 'close'}
+        )
+    else:
+        _session.put_nonce = _nonce
+
+    _res = put_iqueue(_session, tokenid, token)
+    if _res is not None:
+        return _res
+
+    return get_oqueue(_session, sid, 0.02)
+
+
+@app.get('/api/logout')
+def logout(
+    sid: str = Cookie(default=...),
+    nonce: str = Cookie(default=...)
+):
+    print('[I] Closing session:', sid)
+    if sid not in sessions:
+        return JSONResponse(
+            {'error': 'Session ID not found'},
+            status_code=404,
+            headers={'connection': 'close'}
+        )
+
+    _session: Forwarder = sessions[sid]
+    try:
+        _nonce = float(_session.cipher.decrypt(nonce))
+    except Exception as identifier:
+        print('[E] Failed to decrypt nonce:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid nonce'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+    if _nonce <= _session.put_nonce or _nonce <= _session.get_nonce:
+        print('[E] Received duplicated nonce.')
+        return JSONResponse(
+            {'error': 'Duplicated nonce'},
+            status_code=403,
+            headers={'connection': 'close'}
+        )
+
+    _session.close()
+    sessions.pop(sid, None)
+    return JSONResponse({'error': None}, headers={'connection': 'close'})
 
 
 def server(host, port, max_sessions=None, buffer_size=None, queue_size=None, reorder_limit=None):

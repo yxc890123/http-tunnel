@@ -1,7 +1,7 @@
 import socket, threading, multiprocessing
 
 import http.cookies
-from requests import Session
+from requests import Request, Session
 import queue
 
 import sys, os, time
@@ -11,9 +11,20 @@ from .common import Config, find_packet
 settings = Config()
 
 
-def handle_connection(conn: socket.socket, addr, forward_url=None, forward_srv=None, buffer_size=None, queue_size=None, reorder_limit=None):
+def handle_connection(
+    conn: socket.socket,
+    addr,
+    forward_url=None,
+    method=None,
+    forward_srv=None,
+    buffer_size=None,
+    queue_size=None,
+    reorder_limit=None
+):
     if forward_url is not None:
         settings.forward_url = forward_url
+    if method is not None:
+        settings.method = method
     if forward_srv is not None:
         settings.forward_srv = forward_srv
     if buffer_size is not None:
@@ -212,15 +223,21 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
 def _transfer(
     iqueue: queue.Queue,
     req: Session,
-    headers: dict,
+    method,
+    headers: dict[str, str],
+    body: dict[str, str],
     aes: Crypto_AES,
     done: threading.Event
 ):
+    _req = Request(
+        method=method,
+        url=f'{settings.forward_url}/api/session',
+        headers=headers,
+        # content-type: application/json is auto provided
+        json=None if method == 'GET' else body
+    )
     try:
-        _res = req.get(
-            f'{settings.forward_url}/api/session',
-            headers=headers
-        )
+        _res = req.send(_req.prepare())
     except Exception as identifier:
         print('[E] Request /api/session failed:', identifier.args)
         done.set()
@@ -282,6 +299,7 @@ def handle_transfer(
 ):
     _cookie = http.cookies.SimpleCookie()
     _cookie['sid'] = sid
+    _body = {}
     _tokenid = 0
     while not done.is_set():
         _cookie['nonce'] = aes.encrypt(str(time.time()).encode())
@@ -289,6 +307,7 @@ def handle_transfer(
             _transfer(
                 iqueue,
                 request,
+                'GET',
                 {
                     'cookie': _cookie.output(header='', sep=';').strip(),
                     'cache-control': 'no-cache',
@@ -296,6 +315,7 @@ def handle_transfer(
                     'connection': 'keep-alive',
                     'proxy-connection': 'keep-alive'
                 },
+                _body,
                 aes,
                 done
             )
@@ -324,11 +344,18 @@ def handle_transfer(
                 _token[_index] = aes.encrypt(_token[_index])
 
             # print('[D] sending tokenid:', sid, _id)
-            _cookie['tokenid'] = aes.encrypt(' '.join(_id).encode())
-            _cookie['token'] = ' '.join(_token[:len(_id)])
+            _req_tokenid = aes.encrypt(' '.join(_id).encode())
+            _req_token = ' '.join(_token[:len(_id)])
+            if settings.method == 'GET':
+                _cookie['tokenid'] = _req_tokenid
+                _cookie['token'] = _req_token
+            else:
+                _body['tokenid'] = _req_tokenid
+                _body['token'] = _req_token
             _transfer(
                 iqueue,
                 request,
+                settings.method,
                 {
                     'cookie': _cookie.output(header='', sep=';').strip(),
                     'cache-control': 'no-cache',
@@ -336,6 +363,7 @@ def handle_transfer(
                     'connection': 'keep-alive',
                     'proxy-connection': 'keep-alive'
                 },
+                _body,
                 aes,
                 done
             )
@@ -343,7 +371,16 @@ def handle_transfer(
     print('[D] Transfer closed, mode:', mode)
 
 
-def client(host, port, forward_url=None, forward_srv=None, buffer_size=None, queue_size=None, reorder_limit=None):
+def client(
+    host,
+    port,
+    forward_url=None,
+    method=None,
+    forward_srv=None,
+    buffer_size=None,
+    queue_size=None,
+    reorder_limit=None
+):
     print('[I] Starting client mode.')
     try:
         _sock = socket.create_server(
@@ -373,6 +410,18 @@ def client(host, port, forward_url=None, forward_srv=None, buffer_size=None, que
     while True:
         conn, addr = _sock.accept()
         print('[I] Connection accepted:', addr)
-        _child = multiprocessing.Process(target=handle_connection, args=(conn, addr, forward_url, forward_srv, buffer_size, queue_size, reorder_limit))
+        _child = multiprocessing.Process(
+            target=handle_connection,
+            args=(
+                conn,
+                addr,
+                forward_url,
+                method,
+                forward_srv,
+                buffer_size,
+                queue_size,
+                reorder_limit
+            )
+        )
         _child.start()
         threading.Thread(target=lambda ps: ps.join(), args=(_child,)).start()
