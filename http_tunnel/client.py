@@ -1,6 +1,5 @@
 import socket, threading, multiprocessing
 
-import http.cookies
 from requests import Request, Session
 import queue
 
@@ -42,9 +41,9 @@ def handle_connection(
         conn.close()
         print('[I] Connection closed:', addr)
 
-    _req = Session()
+    _client = Session()
     try:
-        _res = _req.get(
+        _res = _client.get(
             f'{settings.forward_url}/',
             headers={
                 'cache-control': 'no-cache',
@@ -72,25 +71,27 @@ def handle_connection(
         close()
         return
 
-    _cookie = http.cookies.SimpleCookie()
+    _cookie = {}
     # with OAEP padding: maxLen(190)=keyLen(2048)/8-2*hashLen(256)/8-2
     _pass = os.urandom(190)
     _cookie['secret'] = _rsa.encrypt(_pass)
     _aes = Crypto_AES(_pass)
     _cookie['token'] = _aes.encrypt(settings.forward_srv.encode())
+    _req = Request(
+        method='GET',
+        url=f'{settings.forward_url}/api/login',
+        headers={
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'connection': 'keep-alive',
+            'proxy-connection': 'keep-alive'
+        },
+        cookies=_cookie
+    )
     try:
-        _res = _req.get(
-            f'{settings.forward_url}/api/login',
-            headers={
-                'cookie': _cookie.output(header='', sep=';').strip(),
-                'cache-control': 'no-cache',
-                'pragma': 'no-cache',
-                'connection': 'keep-alive',
-                'proxy-connection': 'keep-alive'
-            }
-        )
+        _res = _client.send(_req.prepare())
     except Exception as identifier:
-        print('[E] Request /api/login failed:', identifier)
+        print('[E] Request /api/login failed:', identifier.args)
         close()
         return
     if _res.status_code >= 400:
@@ -104,7 +105,6 @@ def handle_connection(
         return
     print('[I] Session started:', _sid)
     _cookie['sid'] = _sid
-
     _cookie.pop('secret')
     _cookie.pop('token')
 
@@ -118,39 +118,52 @@ def handle_connection(
 
     _done = threading.Event()
 
-    _transfer_thread1 = threading.Thread(
+    _transfer_put = threading.Thread(
         target=handle_transfer,
-        args=(_export_queue, _import_queue, _req, _sid, _aes, 'put', _done)
+        args=(_export_queue, _import_queue, _client, _sid, _aes, 'put', _done)
     )
-    _transfer_thread1.start()
-    _transfer_thread2 = threading.Thread(
+    _transfer_put.start()
+    _transfer_get = threading.Thread(
         target=handle_transfer,
-        args=(_export_queue, _import_queue, _req, _sid, _aes, 'get', _done)
+        args=(_export_queue, _import_queue, _client, _sid, _aes, 'get', _done)
     )
-    _transfer_thread2.start()
+    _transfer_get.start()
 
+    try:
+        # KeyboardInterrupt in thread
+        _transfer_put.join()
+        _transfer_get.join()
+    except Exception:
+        _import_queue.put(None)
+
+    while not _export_queue.empty():
+        try:
+            _export_queue.get_nowait()
+        except Exception:
+            break
     _input_thread.join()
     _output_thread.join()
-    _transfer_thread1.join()
-    _transfer_thread2.join()
-
     close()
+
+    # logout
+    _cookie['nonce'] = _aes.encrypt(str(time.time()).encode())
+    _req = Request(
+        method='GET',
+        url=f'{settings.forward_url}/api/logout',
+        headers={
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'connection': 'close',
+            'proxy-connection': 'close'
+        },
+        cookies=_cookie
+    )
     try:
-        _cookie['nonce'] = _aes.encrypt(str(time.time()).encode())
-        _req.get(
-            f'{settings.forward_url}/api/logout',
-            headers={
-                'cookie': _cookie.output(header='', sep=';').strip(),
-                'cache-control': 'no-cache',
-                'pragma': 'no-cache',
-                'connection': 'close',
-                'proxy-connection': 'close'
-            }
-        )
-        _req.close()
-        print('[I] Session ended:', _sid)
+        _client.send(_req.prepare())
+        _client.close()
     except Exception:
         return
+    print('[I] Session ended:', _sid)
 
 
 def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
@@ -165,7 +178,10 @@ def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
         equeue.put(_d)
         if len(_d) == 0:
             break
-    equeue.put(None)
+    try:
+        equeue.put_nowait(None)
+    except Exception:
+        pass
     print('[D] Input closed.')
 
 
@@ -222,65 +238,70 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
 
 def _transfer(
     iqueue: queue.Queue,
-    req: Session,
+    client: Session,
     method,
     headers: dict[str, str],
+    cookies: dict[str, str],
     body: dict[str, str],
     aes: Crypto_AES,
     done: threading.Event
 ):
+    def terminate():
+        done.set()
+        iqueue.put(None)
+
     _req = Request(
         method=method,
         url=f'{settings.forward_url}/api/session',
         headers=headers,
+        cookies=cookies,
         # content-type: application/json is auto provided
         json=None if method == 'GET' else body
     )
     try:
-        _res = req.send(_req.prepare())
+        _res = client.send(_req.prepare())
     except Exception as identifier:
         print('[E] Request /api/session failed:', identifier.args)
-        done.set()
-        iqueue.put(None)
+        terminate()
         return
     if _res.status_code >= 400:
         print('[E] Response /api/session invalid:', _res.status_code, _res.text)
-        done.set()
-        iqueue.put(None)
+        terminate()
         return
-    if _res.cookies.get('sid') != req.cookies.get('sid'):
+    if _res.cookies.get('sid', None) != cookies.get('sid', None):
         print('[E] Invalid sid in response /api/session.')
-        done.set()
-        iqueue.put(None)
+        terminate()
         return
 
     # _res_tokenid = _res.cookies.get('tokenid')
     # _res_token = _res.cookies.get('token')
-    _res_tokenid = _res.json().get('tokenid', None)
-    _res_token = _res.json().get('token', None)
+    try:
+        _res_tokenid = _res.json().get('tokenid', None)
+        _res_token = _res.json().get('token', None)
+    except Exception as identifier:
+        print('[E] Failed to parse response /api/session:', identifier)
+        terminate()
+        return
     if _res_tokenid is None or _res_token is None:
         return
     try:
         _res_tokenid = aes.decrypt(_res_tokenid)
     except Exception as identifier:
         print('[E] Invalid tokenid in response /api/session:', identifier)
-        done.set()
-        iqueue.put(None)
+        terminate()
         return
     for _id, _encrypted in zip(_res_tokenid.decode().split(' '), _res_token.split(' ')):
         try:
             _id = int(_id)
         except Exception as identifier:
             print('[E] Invalid tokenid in response /api/session:', identifier)
-            done.set()
-            iqueue.put(None)
+            terminate()
             return
         try:
             _d = aes.decrypt(_encrypted)
         except Exception as identifier:
             print('[E] Failed to decrypt token from response /api/session:', identifier)
-            done.set()
-            iqueue.put(None)
+            terminate()
             break
         iqueue.put((_id, _d))
         if len(_d) == 0:
@@ -291,13 +312,13 @@ def _transfer(
 def handle_transfer(
     equeue: queue.Queue,
     iqueue: queue.Queue,
-    request: Session,
+    client: Session,
     sid: str,
     aes: Crypto_AES,
     mode: str,
     done: threading.Event
 ):
-    _cookie = http.cookies.SimpleCookie()
+    _cookie = {}
     _cookie['sid'] = sid
     _body = {}
     _tokenid = 0
@@ -306,15 +327,15 @@ def handle_transfer(
         if mode == 'get':
             _transfer(
                 iqueue,
-                request,
+                client,
                 'GET',
                 {
-                    'cookie': _cookie.output(header='', sep=';').strip(),
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                     'connection': 'keep-alive',
                     'proxy-connection': 'keep-alive'
                 },
+                _cookie,
                 _body,
                 aes,
                 done
@@ -354,15 +375,15 @@ def handle_transfer(
                 _body['token'] = _req_token
             _transfer(
                 iqueue,
-                request,
+                client,
                 settings.method,
                 {
-                    'cookie': _cookie.output(header='', sep=';').strip(),
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                     'connection': 'keep-alive',
                     'proxy-connection': 'keep-alive'
                 },
+                _cookie,
                 _body,
                 aes,
                 done

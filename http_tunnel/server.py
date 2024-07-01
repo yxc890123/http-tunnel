@@ -37,6 +37,8 @@ class Forwarder(object):
         self.iqueue = queue.Queue()
         self.oqueue = queue.Queue(settings.queue_size)
         self.reorder_buffer = []
+        self.watchdog_timer = threading.Event()
+        self.watchdog_thread = None
 
     def open(self):
         try:
@@ -58,6 +60,14 @@ class Forwarder(object):
             self.sock.close()
             self.sock = None
             self.iqueue.put(None)
+            self.watchdog_timer.set()
+
+        while not self.oqueue.empty():
+            try:
+                self.oqueue.get_nowait()
+            except Exception:
+                break
+
         self.input_thread.join()
         self.output_thread.join()
 
@@ -105,8 +115,9 @@ class Forwarder(object):
                 self.sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
-        if self.sock:
             self.sock.close()
+            self.sock = None
+            self.watchdog_timer.set()
         print('[D] Input closed.')
 
     def handle_output(self):
@@ -115,16 +126,30 @@ class Forwarder(object):
                 _d = self.sock.recv(settings.buffer_size)
                 # print('[D] recv:', _d)
             except Exception:
-                try:
-                    self.oqueue.put_nowait(b'')
-                except Exception:
-                    pass
+                self.oqueue.put(b'')
                 break
             self.oqueue.put(_d)
             if len(_d) == 0:
                 break
         self.iqueue.put(None)
         print('[D] Output closed.')
+
+    def watchdog(self):
+        while self.sock:
+            if self.watchdog_timer.wait(30.0):
+                self.watchdog_timer.clear()
+            else:
+                print('[E] Session timed out.')
+                self.close()
+
+
+def clean_up():
+    for _sid in list(sessions.keys()):
+        _session: Forwarder = sessions[_sid]
+        if not _session.sock:
+            _session.watchdog_thread.join()
+            sessions.pop(_sid, None)
+            print('[I] Deleted dead session:', _sid)
 
 
 @app.get('/')
@@ -170,13 +195,7 @@ def login(
             headers={'connection': 'close'}
         )
 
-    for _s in list(sessions.keys()):
-        _session: Forwarder = sessions[_s]
-        _t: threading.Thread = _session.output_thread
-        if not _t.is_alive():
-            _session.close()
-            sessions.pop(_s, None)
-
+    clean_up()
     if len(sessions) >= settings.max_sessions:
         return JSONResponse(
             {'error': 'Too many sessions'},
@@ -197,7 +216,10 @@ def login(
         _session.input_thread.start()
         _session.output_thread = threading.Thread(target=_session.handle_output)
         _session.output_thread.start()
+        _session.watchdog_thread = threading.Thread(target=_session.watchdog)
+        _session.watchdog_thread.start()
         sessions[_id] = _session
+
         _res = JSONResponse(
             {'error': None},
             headers={'connection': 'keep-alive'}
@@ -243,15 +265,10 @@ def put_iqueue(session: Forwarder, tokenid, token):
                 status_code=400,
                 headers={'connection': 'close'}
             )
-        session.iqueue.put((int(_id), _token))
         if not session.sock:
-            return JSONResponse(
-                {'error': 'Session closed'},
-                status_code=409,
-                headers={'connection': 'close'}
-            )
+            break
+        session.iqueue.put((int(_id), _token))
         if len(_token) == 0:
-            session.close()
             break
 
 
@@ -260,17 +277,25 @@ def get_oqueue(session: Forwarder, sid, timeout):
         _outq_item = session.oqueue.get(timeout=timeout)
     except Exception:
         if not session.sock:
-            return JSONResponse(
-                {'error': 'Session closed'},
-                status_code=409,
-                headers={'connection': 'close'}
+            session.res_tokenid += 1
+            _res = JSONResponse(
+                {
+                    'error': None,
+                    'tokenid': session.cipher.encrypt(str(session.res_tokenid).encode()),
+                    'token': session.cipher.encrypt(b'')
+                },
+                headers={'connection': 'keep-alive'}
             )
+            _res.set_cookie(key='sid', value=sid, path='/api/')
+            session.watchdog_timer.set()
+            return _res
         _res = JSONResponse(
             {'error': None},
             status_code=202,
             headers={'connection': 'keep-alive'}
         )
         _res.set_cookie(key='sid', value=sid, path='/api/')
+        session.watchdog_timer.set()
         return _res
 
     session.res_tokenid += 1
@@ -299,6 +324,7 @@ def get_oqueue(session: Forwarder, sid, timeout):
     _res.set_cookie(key='sid', value=sid, path='/api/')
     # _res.set_cookie(key='tokenid', value=session.cipher.encrypt(' '.join(_res_tokenid)), path='/api/')
     # _res.set_cookie(key='token', value=' '.join(_res_token), path='/api/')
+    session.watchdog_timer.set()
     return _res
 
 
@@ -330,6 +356,14 @@ def session(
         return JSONResponse(
             {'error': 'Invalid nonce'},
             status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    if not _session.sock:
+        clean_up()
+        return JSONResponse(
+            {'error': 'Session already closed'},
+            status_code=409,
             headers={'connection': 'close'}
         )
 
@@ -394,6 +428,14 @@ def session_with_body(
             headers={'connection': 'close'}
         )
 
+    if not _session.sock:
+        clean_up()
+        return JSONResponse(
+            {'error': 'Session already closed'},
+            status_code=409,
+            headers={'connection': 'close'}
+        )
+
     if _nonce <= _session.put_nonce:
         print('[E] Received duplicated nonce.')
         return JSONResponse(
@@ -443,7 +485,9 @@ def logout(
         )
 
     _session.close()
+    _session.watchdog_thread.join()
     sessions.pop(sid, None)
+    clean_up()
     return JSONResponse({'error': None}, headers={'connection': 'close'})
 
 
