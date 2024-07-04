@@ -10,38 +10,41 @@ exec_file = os.path.basename(sys.argv[0])
 help_text = f'''http-tunnel
 
 Socket over HTTP.
-Version: 0.3
+Version: 0.4
 
 Usage:
-    {exec_file} -c [-h HOST] [-p PORT] [-r URL] [-d HOST:PORT] [-b BUFFER] [-q QUEUE]
-    {exec_file} -s [-h HOST] [-p PORT] [-m NUM] [-b BUFFER] [-q QUEUE]
+    {exec_file} -c [options]
+    {exec_file} -s [options]
 
 Options:
-    --help                          Show this message.
-
     -c, --client                    Run as client.
     -s, --server                    Run as server.
 
-    -h, --host HOST                 Listen IP address. [default: any]
-    -p, --port PORT                 Listen port. [default: 80 on server, 22 on client]
+    -h, --host HOST                 Listen IP address. [Default: any]
+    -p, --port PORT                 Listen port. [Default: 80 on server, 22 on client]
 
-    -r, --remote URL                URL of the remote server. [default: http://localhost:80]
-                                    (Only used in client mode)
-    --method METHOD                 HTTP method for sending data to the server. [default: GET]
+    -r, --remote URL                URL of the remote server. [Default: http://127.0.0.1:80]
+                                    (Only for client mode)
+    -6, --ipv6                      Resolve remote FQDN with IPv6 before sending requests. [Default: IPv4]
+                                    If resolve is failed, send requests with FQDN directly.
+                                    (Only for client mode, added in version 0.4)
+    --method METHOD                 HTTP method for sending data to the server. [Default: GET]
                                     Available options: GET, POST, PUT, DELETE, PATCH
-                                    (Only used in client mode, added in version 0.3)
-    -d, --destination HOST:PORT     Destination that server will connect to. [default: localhost:22]
-                                    (Only used in client mode)
-    -m, --max-sessions NUM          Maximum tunnels that server will open at same time. [default: 10]
-                                    (Only used in server mode)
+                                    (Only for client mode, added in version 0.3)
+    -d, --destination HOST:PORT     Destination that server will connect to. [Default: 127.0.0.1:22]
+                                    (Only for client mode)
 
-    -b, --buffer BUFFER             Maximum size in bytes (per packet) that is sent to the tunnel. [default: 32768]
-                                    (Find the best number for yourself)
-    -q, --queue QUEUE               Maximum packets that are sent to the tunnel at once. [default: 10]
-                                    (Find the best number for yourself)
+    -m, --max-sessions NUM          Maximum tunnels that server will open at same time. [Default: 10]
+                                    (Only for server mode)
 
-    --reorder-buffer                Maximum packets can be held that were not received in order. [default: 20]
+    -b, --buffer BUFFER             Maximum size in bytes (per packet) that is sent to the tunnel. [Default: 32768]
+                                    (Find the best number for yourself)
+    -q, --queue QUEUE               Maximum packets that are sent to the tunnel at once. [Default: 10]
+                                    (Find the best number for yourself)
+    --reorder-buffer                Maximum packets can be held that were not received in order. [Default: 20]
                                     (Added in version 0.2)
+
+    --help                          Show this message.
 '''
 
 
@@ -51,9 +54,21 @@ def start_client(**kwargs):
     host = kwargs.get('host', '')
     port = kwargs.get('port', 22)
     remote = kwargs.get('remote', None)
+    if remote is not None:
+        try:
+            _r_host = remote.split('://')[1].split('/')[0].split(':')[0]
+        except Exception:
+            print('[E] Invalid arguments: remote.', end='\n\n')
+            print(help_text)
+            exit(1)
+        if not _r_host:
+            print('[E] Invalid arguments: remote.', end='\n\n')
+            print(help_text)
+            exit(1)
+    ipv6 = kwargs.get('ipv6', False)
     method = kwargs.get('method', None)
     if method not in (None, 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'):
-        print('[E] Invalid method.', end='\n\n')
+        print('[E] Invalid arguments: method.', end='\n\n')
         print(help_text)
         exit(1)
     destination = kwargs.get('destination', None)
@@ -61,7 +76,7 @@ def start_client(**kwargs):
     queue = kwargs.get('queue', None)
     reorder = kwargs.get('reorder', None)
 
-    client(host, port, remote, method, destination, buffer, queue, reorder)
+    client(host, port, remote, ipv6, method, destination, buffer, queue, reorder)
 
 
 def start_server(**kwargs):
@@ -87,7 +102,7 @@ def main():
     try:
         (opts, args) = getopt(
             sys.argv[1:],
-            'csh:p:r:d:m:b:q:',
+            'csh:p:r:6d:m:b:q:',
             [
                 'help',
                 'client',
@@ -95,6 +110,7 @@ def main():
                 'host=',
                 'port=',
                 'remote=',
+                'ipv6',
                 'method=',
                 'destination=',
                 'max-sessions=',
@@ -133,6 +149,8 @@ def main():
                 _args['port'] = int(opt[1])
             elif opt[0] in ('-r', '--remote'):
                 _args['remote'] = opt[1]
+            elif opt[0] in ('-6', '--ipv6'):
+                _args['ipv6'] = True
             elif opt[0] == '--method':
                 _args['method'] = opt[1].upper()
             elif opt[0] in ('-d', '--destination'):

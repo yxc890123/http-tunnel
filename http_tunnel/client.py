@@ -13,7 +13,8 @@ settings = Config()
 def handle_connection(
     conn: socket.socket,
     addr,
-    forward_url=None,
+    forward_url: str = None,
+    ipv6=False,
     method=None,
     forward_srv=None,
     buffer_size=None,
@@ -21,7 +22,23 @@ def handle_connection(
     reorder_limit=None
 ):
     if forward_url is not None:
-        settings.forward_url = forward_url
+        settings.forward_host = forward_url.split('://')[1].split('/')[0]  # with port
+        # incase [ipv6 address] instead domain in url
+        _f_port = settings.forward_host.split(']')[-1].split(':')[-1]
+        if _f_port == settings.forward_host:
+            _f_port = ''
+        _f_host = settings.forward_host.rstrip(f':{_f_port}').lstrip('[').rstrip(']')
+        try:
+            _f_ips = socket.getaddrinfo(_f_host, None, type=socket.SOCK_STREAM, flags=socket.AI_ALL)
+            if ipv6:
+                _f_ipv6 = [sockaddr[0] for family, *_, sockaddr in _f_ips if family == socket.AF_INET6][0]
+                settings.forward_url = forward_url.replace(f'://{settings.forward_host}', f'://[{_f_ipv6}]:{_f_port}')
+            else:
+                _f_ipv4 = [sockaddr[0] for family, *_, sockaddr in _f_ips if family == socket.AF_INET][0]
+                settings.forward_url = forward_url.replace(f'://{settings.forward_host}', f'://{_f_ipv4}:{_f_port}')
+        except Exception:
+            print('[W] Resolve FQDN failed, sending requests with FQDN directly.')
+            settings.forward_url = forward_url
     if method is not None:
         settings.method = method
     if forward_srv is not None:
@@ -46,12 +63,16 @@ def handle_connection(
         _res = _client.get(
             f'{settings.forward_url}/',
             headers={
+                'host': settings.forward_host,
                 'cache-control': 'no-cache',
                 'pragma': 'no-cache',
                 'connection': 'keep-alive',
                 'proxy-connection': 'keep-alive'
             }
         )
+    except (KeyboardInterrupt, SystemExit):
+        close()
+        return
     except Exception as identifier:
         print('[E] Request / failed:', identifier)
         close()
@@ -81,6 +102,7 @@ def handle_connection(
         method='GET',
         url=f'{settings.forward_url}/api/login',
         headers={
+            'host': settings.forward_host,
             'cache-control': 'no-cache',
             'pragma': 'no-cache',
             'connection': 'keep-alive',
@@ -90,6 +112,9 @@ def handle_connection(
     )
     try:
         _res = _client.send(_req.prepare())
+    except (KeyboardInterrupt, SystemExit):
+        close()
+        return
     except Exception as identifier:
         print('[E] Request /api/login failed:', identifier.args)
         close()
@@ -130,10 +155,9 @@ def handle_connection(
     _transfer_get.start()
 
     try:
-        # KeyboardInterrupt in thread
         _transfer_put.join()
         _transfer_get.join()
-    except Exception:
+    except (KeyboardInterrupt, SystemExit):
         _import_queue.put(None)
 
     while not _export_queue.empty():
@@ -151,6 +175,7 @@ def handle_connection(
         method='GET',
         url=f'{settings.forward_url}/api/logout',
         headers={
+            'host': settings.forward_host,
             'cache-control': 'no-cache',
             'pragma': 'no-cache',
             'connection': 'close',
@@ -264,6 +289,25 @@ def _transfer(
         print('[E] Request /api/session failed:', identifier.args)
         terminate()
         return
+    if _res.status_code >= 500:
+        _fixed = False
+        for _ in range(3):
+            print('[W] Response /api/session invalid:', _res.status_code, 'retring...')
+            try:
+                _res = client.send(_req.prepare())
+            except Exception as identifier:
+                print('[E] Request /api/session failed:', identifier.args)
+                terminate()
+                return
+            if _res.status_code < 500:
+                _fixed = True
+                break
+        if not _fixed:
+            print('[E] Response /api/session invalid:', _res.status_code, _res.text)
+            for key in _res.headers.keys():
+                print(f'{key}: {_res.headers[key]}')
+            terminate()
+            return
     if _res.status_code >= 400:
         print('[E] Response /api/session invalid:', _res.status_code, _res.text)
         terminate()
@@ -330,6 +374,7 @@ def handle_transfer(
                 client,
                 'GET',
                 {
+                    'host': settings.forward_host,
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                     'connection': 'keep-alive',
@@ -378,6 +423,7 @@ def handle_transfer(
                 client,
                 settings.method,
                 {
+                    'host': settings.forward_host,
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                     'connection': 'keep-alive',
@@ -396,6 +442,7 @@ def client(
     host,
     port,
     forward_url=None,
+    ipv6=False,
     method=None,
     forward_srv=None,
     buffer_size=None,
@@ -437,6 +484,7 @@ def client(
                 conn,
                 addr,
                 forward_url,
+                ipv6,
                 method,
                 forward_srv,
                 buffer_size,
