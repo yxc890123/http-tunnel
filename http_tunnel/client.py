@@ -186,9 +186,12 @@ def handle_connection(
     try:
         _client.send(_req.prepare())
         _client.close()
+    except (KeyboardInterrupt, SystemExit):
+        return
     except Exception:
         return
-    print('[I] Session ended:', _sid)
+    finally:
+        print('[I] Session ended:', _sid)
 
 
 def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
@@ -241,7 +244,8 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
                 print('[E] Response packet loss: Timed out')
                 break
             except Exception as identifier:
-                print('[E] Response packet loss:', identifier)
+                if str(identifier) != 'Abort':
+                    print('[E] Response packet loss:', identifier)
                 break
 
         _res_tokenid = _item[0]

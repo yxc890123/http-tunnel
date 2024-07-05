@@ -23,6 +23,8 @@ def find_packet(
     reorder_limit: int
 ):
     _item = input_queue.get(timeout=10.0)
+    if _item is None:
+        raise Exception('Abort')
     if _item[0] < target_id:
         print('[W] Received a duplicated packet, ignored.')
         return find_packet(target_id, input_queue, reorder_buffer, reorder_limit)
