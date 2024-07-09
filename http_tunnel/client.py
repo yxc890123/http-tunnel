@@ -10,6 +10,16 @@ from .common import Config, find_packet
 settings = Config()
 
 
+def base_headers():
+    return {
+        'host': settings.forward_host,
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+        'connection': 'keep-alive',
+        'proxy-connection': 'keep-alive'
+    }
+
+
 def handle_connection(
     conn: socket.socket,
     addr,
@@ -62,13 +72,7 @@ def handle_connection(
     try:
         _res = _client.get(
             f'{settings.forward_url}/',
-            headers={
-                'host': settings.forward_host,
-                'cache-control': 'no-cache',
-                'pragma': 'no-cache',
-                'connection': 'keep-alive',
-                'proxy-connection': 'keep-alive'
-            }
+            headers=base_headers()
         )
     except (KeyboardInterrupt, SystemExit):
         close()
@@ -93,7 +97,7 @@ def handle_connection(
         return
 
     _cookie = {}
-    # with OAEP padding: maxLen(190)=keyLen(2048)/8-2*hashLen(256)/8-2
+    # with OAEP padding: maxLen(190)=keyLen(2048)/8 - 2*hashLen(256)/8 - 2
     _pass = os.urandom(190)
     _cookie['secret'] = _rsa.encrypt(_pass)
     _aes = Crypto_AES(_pass)
@@ -101,13 +105,7 @@ def handle_connection(
     _req = Request(
         method='GET',
         url=f'{settings.forward_url}/api/login',
-        headers={
-            'host': settings.forward_host,
-            'cache-control': 'no-cache',
-            'pragma': 'no-cache',
-            'connection': 'keep-alive',
-            'proxy-connection': 'keep-alive'
-        },
+        headers=base_headers(),
         cookies=_cookie
     )
     try:
@@ -116,16 +114,16 @@ def handle_connection(
         close()
         return
     except Exception as identifier:
-        print('[E] Request /api/login failed:', identifier.args)
+        print('[E] Request to login failed:', identifier.args)
         close()
         return
     if _res.status_code >= 400:
-        print('[E] Response /api/login invalid:', _res.status_code, _res.text)
+        print('[E] Response from login invalid:', _res.status_code, _res.text)
         close()
         return
     _sid = _res.cookies.get('sid')
     if _sid is None:
-        print('[E] Invalid sid in response /api/login.')
+        print('[E] Invalid sid in response from login.')
         close()
         return
     print('[I] Session started:', _sid)
@@ -143,22 +141,31 @@ def handle_connection(
 
     _done = threading.Event()
 
-    _transfer_put = threading.Thread(
-        target=handle_transfer,
-        args=(_export_queue, _import_queue, _client, _sid, _aes, 'put', _done)
-    )
-    _transfer_put.start()
-    _transfer_get = threading.Thread(
-        target=handle_transfer,
-        args=(_export_queue, _import_queue, _client, _sid, _aes, 'get', _done)
-    )
-    _transfer_get.start()
+    if settings.method == 'WS':
+        handle_ws(
+            equeue=_export_queue,
+            iqueue=_import_queue,
+            sid=_sid,
+            aes=_aes,
+            done=_done
+        )
+    else:
+        _transfer_put = threading.Thread(
+            target=handle_transfer,
+            args=(_export_queue, _import_queue, _client, _sid, _aes, 'put', _done)
+        )
+        _transfer_put.start()
+        _transfer_get = threading.Thread(
+            target=handle_transfer,
+            args=(_export_queue, _import_queue, _client, _sid, _aes, 'get', _done)
+        )
+        _transfer_get.start()
 
-    try:
-        _transfer_put.join()
-        _transfer_get.join()
-    except (KeyboardInterrupt, SystemExit):
-        _import_queue.put(None)
+        try:
+            _transfer_put.join()
+            _transfer_get.join()
+        except (KeyboardInterrupt, SystemExit):
+            _import_queue.put(None)
 
     while not _export_queue.empty():
         try:
@@ -265,11 +272,182 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
     print('[D] Output closed.')
 
 
+tokenid = 0
+
+
+def get_equeue(equeue: queue.Queue, aes: Crypto_AES, done: threading.Event):
+    _token = [equeue.get()]
+    _id = []
+
+    while not equeue.empty():
+        try:
+            _token.append(equeue.get_nowait())
+        except Exception:
+            break
+        if len(_token) >= settings.queue_size:
+            break
+
+    global tokenid
+    for _item in _token:
+        if _item is None:
+            done.set()
+            break
+        tokenid += 1
+        _id.append(str(tokenid))
+
+    if len(_id) == 0:
+        return  # got only None
+
+    for _index in range(len(_id)):
+        _token[_index] = aes.encrypt(_token[_index])
+
+    # print('[D] sending tokenid:', sid, _id)
+    _req_tokenid = aes.encrypt(' '.join(_id).encode())
+    _req_token = ' '.join(_token[:len(_id)])
+    return (_req_tokenid, _req_token)
+
+
+def put_iqueue(iqueue: queue.Queue, data: dict[str, str], aes: Crypto_AES, done: threading.Event):
+    def terminate():
+        done.set()
+        iqueue.put(None)
+
+    _res_tokenid = data.get('tokenid', None)
+    _res_token = data.get('token', None)
+    if _res_tokenid is None or _res_token is None:
+        return
+    try:
+        _res_tokenid = aes.decrypt(_res_tokenid)
+    except Exception as identifier:
+        print('[E] Invalid tokenid in response from session:', identifier)
+        terminate()
+        return
+    for _id, _encrypted in zip(_res_tokenid.decode().split(' '), _res_token.split(' ')):
+        try:
+            _id = int(_id)
+        except Exception as identifier:
+            print('[E] Invalid tokenid in response from session:', identifier)
+            terminate()
+            return
+        try:
+            _d = aes.decrypt(_encrypted)
+        except Exception as identifier:
+            print('[E] Failed to decrypt token from response from session:', identifier)
+            terminate()
+            return
+        iqueue.put((_id, _d))
+        if len(_d) == 0:
+            done.set()
+            break
+
+
+def _ws_send(
+    equeue: queue.Queue,
+    client,
+    aes: Crypto_AES,
+    done: threading.Event
+):
+    import json
+
+    _body = {}
+    while not done.is_set():
+        _req_data = get_equeue(equeue, aes, done)
+        if _req_data is None:
+            break  # set
+        _body['tokenid'], _body['token'] = _req_data
+        try:
+            client.send(json.dumps(_body).encode())
+        except Exception as identifier:
+            print('[D] Send websocket failed:', identifier)
+            done.set()
+            break
+        # print('[D] Sent websocket:', _body)
+    client.close()
+
+
+def _ws_recv(
+    iqueue: queue.Queue,
+    client,
+    aes: Crypto_AES,
+    done: threading.Event
+):
+    import json
+
+    def terminate():
+        done.set()
+        iqueue.put(None)
+
+    while not done.is_set():
+        try:
+            _res = client.recv()
+            # print('[D] Received websocket:', _res)
+        except Exception as identifier:
+            print('[D] Receive websocket failed:', identifier)
+            terminate()
+            break
+
+        try:
+            _res_data = json.loads(_res)
+        except Exception as identifier:
+            print('[E] Failed to parse response from session:', identifier)
+            terminate()
+            break
+        if _res_data.get('error', None) == 'Timeout':
+            try:
+                client.send(b'{}')
+            except Exception:
+                pass
+        put_iqueue(iqueue, _res_data, aes, done)
+    client.close()
+
+
+def handle_ws(
+    equeue: queue.Queue,
+    iqueue: queue.Queue,
+    sid: str,
+    aes: Crypto_AES,
+    done: threading.Event
+):
+    from websockets.sync.client import connect
+
+    print('[D] Websocket mode started.')
+    _cookie = {}
+    _cookie['sid'] = sid
+    _cookie['nonce'] = aes.encrypt(str(time.time()).encode())
+    _cookie_text = ''
+    for key in _cookie.keys():
+        _cookie_text += f'{key}={_cookie[key]}; '
+    _cookie_text = _cookie_text.strip().strip(';')
+
+    _f_schema = settings.forward_url.split('://')[0]
+    try:
+        _client = connect(
+            f'{_f_schema.replace('http', 'ws')}://{settings.forward_host}/api/session',
+            additional_headers={'cookie': _cookie_text},
+            compression=None
+        )
+    except Exception as identifier:
+        print('[E] Connect websocket to session failed:', identifier)
+        iqueue.put(None)
+        return
+    if not _client.response.headers.get('set-cookie', '').startswith(f'sid={sid};'):
+        print('[E] Invalid sid in response from session.')
+        iqueue.put(None)
+        return
+
+    _send_thread = threading.Thread(target=_ws_send, args=(equeue, _client, aes, done))
+    _send_thread.start()
+    _recv_thread = threading.Thread(target=_ws_recv, args=(iqueue, _client, aes, done))
+    _recv_thread.start()
+    _send_thread.join()
+    _recv_thread.join()
+    print('[D] Websocket mode closed.')
+
+
 def _transfer(
     iqueue: queue.Queue,
     client: Session,
     method,
-    headers: dict[str, str],
     cookies: dict[str, str],
     body: dict[str, str],
     aes: Crypto_AES,
@@ -282,7 +460,7 @@ def _transfer(
     _req = Request(
         method=method,
         url=f'{settings.forward_url}/api/session',
-        headers=headers,
+        headers=base_headers(),
         cookies=cookies,
         # content-type: application/json is auto provided
         json=None if method == 'GET' else body
@@ -290,71 +468,45 @@ def _transfer(
     try:
         _res = client.send(_req.prepare())
     except Exception as identifier:
-        print('[E] Request /api/session failed:', identifier.args)
+        print('[E] Request to session failed:', identifier.args)
         terminate()
         return
     if _res.status_code >= 500:
         _fixed = False
-        for _ in range(3):
-            print('[W] Response /api/session invalid:', _res.status_code, 'retring...')
+        for _ in range(5):
+            print('[W] Response from session invalid:', _res.status_code, 'retring...')
+            time.sleep(0.5)
             try:
                 _res = client.send(_req.prepare())
             except Exception as identifier:
-                print('[E] Request /api/session failed:', identifier.args)
+                print('[E] Request to session failed:', identifier.args)
                 terminate()
                 return
             if _res.status_code < 500:
                 _fixed = True
                 break
         if not _fixed:
-            print('[E] Response /api/session invalid:', _res.status_code, _res.text)
+            print('[E] Response from session invalid:', _res.status_code, _res.text)
             for key in _res.headers.keys():
                 print(f'{key}: {_res.headers[key]}')
             terminate()
             return
     if _res.status_code >= 400:
-        print('[E] Response /api/session invalid:', _res.status_code, _res.text)
+        print('[E] Response from session invalid:', _res.status_code, _res.text)
         terminate()
         return
     if _res.cookies.get('sid', None) != cookies.get('sid', None):
-        print('[E] Invalid sid in response /api/session.')
+        print('[E] Invalid sid in response from session.')
         terminate()
         return
 
-    # _res_tokenid = _res.cookies.get('tokenid')
-    # _res_token = _res.cookies.get('token')
     try:
-        _res_tokenid = _res.json().get('tokenid', None)
-        _res_token = _res.json().get('token', None)
+        _res_data = _res.json()
     except Exception as identifier:
-        print('[E] Failed to parse response /api/session:', identifier)
+        print('[E] Failed to parse response from session:', identifier)
         terminate()
         return
-    if _res_tokenid is None or _res_token is None:
-        return
-    try:
-        _res_tokenid = aes.decrypt(_res_tokenid)
-    except Exception as identifier:
-        print('[E] Invalid tokenid in response /api/session:', identifier)
-        terminate()
-        return
-    for _id, _encrypted in zip(_res_tokenid.decode().split(' '), _res_token.split(' ')):
-        try:
-            _id = int(_id)
-        except Exception as identifier:
-            print('[E] Invalid tokenid in response /api/session:', identifier)
-            terminate()
-            return
-        try:
-            _d = aes.decrypt(_encrypted)
-        except Exception as identifier:
-            print('[E] Failed to decrypt token from response /api/session:', identifier)
-            terminate()
-            break
-        iqueue.put((_id, _d))
-        if len(_d) == 0:
-            done.set()
-            break
+    put_iqueue(iqueue, _res_data, aes, done)
 
 
 def handle_transfer(
@@ -366,10 +518,10 @@ def handle_transfer(
     mode: str,
     done: threading.Event
 ):
+    print('[D] Transfer started, mode:', mode)
     _cookie = {}
     _cookie['sid'] = sid
     _body = {}
-    _tokenid = 0
     while not done.is_set():
         _cookie['nonce'] = aes.encrypt(str(time.time()).encode())
         if mode == 'get':
@@ -377,45 +529,17 @@ def handle_transfer(
                 iqueue,
                 client,
                 'GET',
-                {
-                    'host': settings.forward_host,
-                    'cache-control': 'no-cache',
-                    'pragma': 'no-cache',
-                    'connection': 'keep-alive',
-                    'proxy-connection': 'keep-alive'
-                },
                 _cookie,
                 _body,
                 aes,
                 done
             )
         else:
-            _token = [equeue.get()]
-            _id = []
-            while not equeue.empty():
-                try:
-                    _token.append(equeue.get_nowait())
-                except Exception:
-                    break
-                if len(_token) >= settings.queue_size:
-                    break
+            _req_data = get_equeue(equeue, aes, done)
+            if _req_data is None:
+                break
+            _req_tokenid, _req_token = _req_data
 
-            for _item in _token:
-                if _item is None:
-                    done.set()
-                    break
-                _tokenid += 1
-                _id.append(str(_tokenid))
-
-            if len(_id) == 0:
-                continue
-
-            for _index in range(len(_id)):
-                _token[_index] = aes.encrypt(_token[_index])
-
-            # print('[D] sending tokenid:', sid, _id)
-            _req_tokenid = aes.encrypt(' '.join(_id).encode())
-            _req_token = ' '.join(_token[:len(_id)])
             if settings.method == 'GET':
                 _cookie['tokenid'] = _req_tokenid
                 _cookie['token'] = _req_token
@@ -426,13 +550,6 @@ def handle_transfer(
                 iqueue,
                 client,
                 settings.method,
-                {
-                    'host': settings.forward_host,
-                    'cache-control': 'no-cache',
-                    'pragma': 'no-cache',
-                    'connection': 'keep-alive',
-                    'proxy-connection': 'keep-alive'
-                },
                 _cookie,
                 _body,
                 aes,

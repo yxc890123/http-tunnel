@@ -1,12 +1,6 @@
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import queue
-
-
 class Config(object):
     def __init__(self) -> None:
-        self.forward_url = 'http://127.0.0.1:80'
+        self.forward_url = 'http://127.0.0.1'
         self.forward_host = 'localhost'
         self.method = 'GET'
         self.forward_srv = '127.0.0.1:22'
@@ -18,7 +12,7 @@ class Config(object):
 
 def find_packet(
     target_id: int,
-    input_queue: 'queue.Queue',
+    input_queue,
     reorder_buffer: list[tuple[int, bytes]],
     reorder_limit: int
 ):

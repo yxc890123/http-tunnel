@@ -33,6 +33,7 @@ otherwise, it may consume a lot of TCP sessions, which is not good and might be 
 
 - Python 3.8+
   - [requests](https://pypi.org/project/requests/) (for easy HTTP session handling)
+  - [websockets](https://pypi.org/project/websockets/)
   - [cryptography](https://pypi.org/project/cryptography/)
   - [fastapi-slim](https://pypi.org/project/fastapi-slim/) (for easy HTTP server implementation)
   - [uvicorn](https://pypi.org/project/uvicorn/) (for easy HTTP server implementation)
@@ -66,12 +67,12 @@ http-tunnel --help
 
 ## Still working on
 
-1. Support other request methods (default will use GET only).
-   1. ~~POST~~
-   2. ~~PUT~~
-   3. ~~DELETE~~
-   4. ~~PATCH~~
-   5. WebSockets
+1. Support other request methods.
+   - [x] ~~POST~~
+   - [x] ~~PUT~~
+   - [x] ~~DELETE~~
+   - [x] ~~PATCH~~
+   - [x] ~~WebSockets~~
 2. Support UDP.
 
 ## As always

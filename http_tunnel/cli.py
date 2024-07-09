@@ -10,7 +10,7 @@ exec_file = os.path.basename(sys.argv[0])
 help_text = f'''http-tunnel
 
 Socket over HTTP.
-Version: 0.4
+Version: 0.5
 
 Usage:
     {exec_file} -c [options]
@@ -29,7 +29,7 @@ Options:
                                     If resolve is failed, send requests with FQDN directly.
                                     (Only for client mode, added in version 0.4)
     --method METHOD                 HTTP method for sending data to the server. [Default: GET]
-                                    Available options: GET, POST, PUT, DELETE, PATCH
+                                    Available options: GET, POST, PUT, DELETE, PATCH, WS(Added in version 0.5)
                                     (Only for client mode, added in version 0.3)
     -d, --destination HOST:PORT     Destination that server will connect to. [Default: 127.0.0.1:22]
                                     (Only for client mode)
@@ -67,7 +67,7 @@ def start_client(**kwargs):
             exit(1)
     ipv6 = kwargs.get('ipv6', False)
     method = kwargs.get('method', None)
-    if method not in (None, 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'):
+    if method not in (None, 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'WS'):
         print('[E] Invalid arguments: method.', end='\n\n')
         print(help_text)
         exit(1)

@@ -2,8 +2,8 @@ from setuptools import setup
 
 setup(
     name='http-tunnel',
-    version='0.4.4',
-    description='HTTP tunneling tool',
+    version='0.5.0',
+    description='HTTP tunneling tool.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     author='yxc890123',
@@ -20,6 +20,7 @@ setup(
     python_requires='>=3.8',
     install_requires=[
         'requests',
+        'websockets',
         'fastapi-slim',
         'uvicorn',
         'cryptography'

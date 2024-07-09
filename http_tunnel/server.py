@@ -1,6 +1,9 @@
 from typing import Union
-from fastapi import FastAPI, Cookie, Body
+from fastapi import FastAPI, Cookie, Body, WebSocket
 from fastapi.responses import PlainTextResponse, JSONResponse
+import asyncio
+import json
+
 import uvicorn
 
 from .crypto import Crypto_AES, Crypto_RSA
@@ -27,6 +30,7 @@ class Forwarder(object):
         self.cipher: Crypto_AES = None
         self.get_nonce = 0.0
         self.put_nonce = 0.0
+        self.ws_nonce = 0.0
         self.host = host
         self.port = port
         self.sock = None
@@ -99,7 +103,8 @@ class Forwarder(object):
                     print('[E] Packet loss: Timed out')
                     break
                 except Exception as identifier:
-                    print('[E] Packet loss:', identifier)
+                    if str(identifier) != 'Abort':
+                        print('[E] Packet loss:', identifier)
                     break
 
             self.tokenid = _item[0]
@@ -115,9 +120,10 @@ class Forwarder(object):
                 self.sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
+        if self.sock:
             self.sock.close()
             self.sock = None
-            self.watchdog_timer.set()
+        self.watchdog_timer.set()
         print('[D] Input closed.')
 
     def handle_output(self):
@@ -280,27 +286,26 @@ def get_oqueue(session: Forwarder, sid, timeout):
             session.res_tokenid += 1
             _res = JSONResponse(
                 {
-                    'error': None,
+                    'error': 'Timeout',
                     'tokenid': session.cipher.encrypt(str(session.res_tokenid).encode()),
                     'token': session.cipher.encrypt(b'')
                 },
                 headers={'connection': 'keep-alive'}
             )
             _res.set_cookie(key='sid', value=sid, path='/api/')
-            session.watchdog_timer.set()
             return _res
         _res = JSONResponse(
-            {'error': None},
+            {'error': 'Timeout'},
             status_code=202,
             headers={'connection': 'keep-alive'}
         )
         _res.set_cookie(key='sid', value=sid, path='/api/')
-        session.watchdog_timer.set()
         return _res
 
     session.res_tokenid += 1
     _res_tokenid = [str(session.res_tokenid)]
     _res_token = [session.cipher.encrypt(_outq_item)]
+
     while not session.oqueue.empty():
         try:
             _outq_item = session.oqueue.get_nowait()
@@ -324,7 +329,6 @@ def get_oqueue(session: Forwarder, sid, timeout):
     _res.set_cookie(key='sid', value=sid, path='/api/')
     # _res.set_cookie(key='tokenid', value=session.cipher.encrypt(' '.join(_res_tokenid)), path='/api/')
     # _res.set_cookie(key='token', value=' '.join(_res_token), path='/api/')
-    session.watchdog_timer.set()
     return _res
 
 
@@ -379,7 +383,7 @@ def session(
         else:
             _session.put_nonce = _nonce
 
-        _timeout = 0.02
+        _timeout = 0.05
 
         _res = put_iqueue(_session, tokenid, token)
         if _res is not None:
@@ -396,7 +400,9 @@ def session(
         else:
             _session.get_nonce = _nonce
 
-    return get_oqueue(_session, sid, _timeout)
+    _res = get_oqueue(_session, sid, _timeout)
+    _session.watchdog_timer.set()
+    return _res
 
 
 @app.post('/api/session')
@@ -450,7 +456,107 @@ def session_with_body(
     if _res is not None:
         return _res
 
-    return get_oqueue(_session, sid, 0.02)
+    _res = get_oqueue(_session, sid, 0.02)
+    _session.watchdog_timer.set()
+    return _res
+
+
+async def recv_ws(session: Forwarder, websocket: WebSocket):
+    print('[D] Websocket recv started.')
+    try:
+        while session.sock:
+            _json = await websocket.receive_bytes()
+            try:
+                _json = json.loads(_json)
+            except Exception as identifier:
+                print('[E] Failed to parse JSON:', identifier)
+                await websocket.send_json({'error': 'Invalid JSON'})
+                break
+            # print('[D] Websocket recv:', _json)
+
+            _tokenid = _json.get('tokenid', None)
+            _token = _json.get('token', None)
+
+            if type(_tokenid) is not type(_token):
+                await websocket.send_json({'error': 'Invalid token'})
+                break
+
+            if _tokenid is not None:
+                _res = put_iqueue(session, _tokenid, _token)
+                if _res is not None:
+                    await websocket.send_json(_res.body)
+                    break
+            session.watchdog_timer.set()
+        print('[D] Websocket recv closed.')
+        await websocket.close()
+    except Exception as identifier:
+        print('[D] Websocket recv disconnected:', identifier)
+
+
+async def send_ws(session: Forwarder, sid, websocket: WebSocket):
+    print('[D] Websocket send started.')
+    try:
+        while session.sock:
+            _res = await asyncio.to_thread(get_oqueue, session, sid, 10.0)
+            _res_obj = json.loads(_res.body)
+            if _res_obj.get('error', ...) is None:
+                session.watchdog_timer.set()
+            await websocket.send_bytes(_res.body)
+            # print('[D] Websocket sent:', _res.body)
+        print('[D] Websocket send closed.')
+        await websocket.close()
+    except Exception as identifier:
+        print('[D] Websocket send disconnected:', identifier)
+
+
+@app.websocket('/api/session')
+async def session_websocket(
+    websocket: WebSocket,
+    sid: str = Cookie(default=...),
+    nonce: str = Cookie(default=...)
+):
+    if sid not in sessions:
+        return JSONResponse(
+            {'error': 'Session ID not found'},
+            status_code=404,
+            headers={'connection': 'close'}
+        )
+
+    _session: Forwarder = sessions[sid]
+    try:
+        _nonce = float(_session.cipher.decrypt(nonce))
+    except Exception as identifier:
+        print('[E] Failed to decrypt nonce:', identifier)
+        return JSONResponse(
+            {'error': 'Invalid nonce'},
+            status_code=400,
+            headers={'connection': 'close'}
+        )
+
+    if not _session.sock:
+        clean_up()
+        return JSONResponse(
+            {'error': 'Session already closed'},
+            status_code=409,
+            headers={'connection': 'close'}
+        )
+
+    if _nonce <= _session.ws_nonce:
+        print('[E] Received duplicated nonce.')
+        return JSONResponse(
+            {'error': 'Duplicated nonce'},
+            status_code=403,
+            headers={'connection': 'close'}
+        )
+    else:
+        _session.ws_nonce = _nonce
+
+    await websocket.accept(headers=[(b'set-cookie', f'sid={sid}; Path=/api/'.encode())])
+
+    await asyncio.gather(
+        recv_ws(_session, websocket),
+        send_ws(_session, sid, websocket)
+    )
 
 
 @app.get('/api/logout')
@@ -510,7 +616,9 @@ def server(host, port, max_sessions=None, buffer_size=None, queue_size=None, reo
         app=app,
         host=host,
         port=port,
+        http='h11',
+        ws='websockets',
         timeout_keep_alive=30,
-        log_level='error',
+        log_level='warning',
         h11_max_incomplete_event_size=1048576  # big enough to handle large cookies
     )
