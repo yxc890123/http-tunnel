@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='http-tunnel',
-    version='0.5.0',
+    version='0.6.9',
     description='HTTP tunneling tool.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
@@ -19,10 +19,10 @@ setup(
     include_package_data=True,
     python_requires='>=3.8',
     install_requires=[
-        'requests',
-        'websockets',
+        'requests[socks]',
         'fastapi-slim',
         'uvicorn',
+        'websockets',
         'cryptography'
     ],
     entry_points={

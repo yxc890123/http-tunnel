@@ -1,6 +1,10 @@
 import socket, threading, multiprocessing
 
 from requests import Request, Session
+from urllib.request import getproxies
+from urllib.parse import urlparse, unquote
+
+import json
 import queue
 
 import sys, os, time
@@ -12,43 +16,72 @@ settings = Config()
 
 def base_headers():
     return {
-        'host': settings.forward_host,
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'connection': 'keep-alive',
-        'proxy-connection': 'keep-alive'
+        'Host': settings.forward_hosth,
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Connection': 'keep-alive',
+        'Proxy-Connection': 'keep-alive'
     }
+
+
+def get_ips(host):
+    try:
+        _ips = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM, flags=socket.AI_ALL)
+    except Exception:
+        return ([], [])
+    _ipv4s = [sockaddr[0] for family, *_, sockaddr in _ips if family == socket.AF_INET]
+    _ipv6s = [sockaddr[0] for family, *_, sockaddr in _ips if family == socket.AF_INET6]
+    return (_ipv4s, _ipv6s)
 
 
 def handle_connection(
     conn: socket.socket,
     addr,
     forward_url: str = None,
+    resolve=False,
     ipv6=False,
     method=None,
     forward_srv=None,
+    no_verify=False,
     buffer_size=None,
     queue_size=None,
     reorder_limit=None
 ):
+    import urllib3
+    if no_verify:
+        urllib3.disable_warnings()
+
     if forward_url is not None:
-        settings.forward_host = forward_url.split('://')[1].split('/')[0]  # with port
-        # incase [ipv6 address] instead domain in url
-        _f_port = settings.forward_host.split(']')[-1].split(':')[-1]
-        if _f_port == settings.forward_host:
-            _f_port = ''
-        _f_host = settings.forward_host.rstrip(f':{_f_port}').lstrip('[').rstrip(']')
-        try:
-            _f_ips = socket.getaddrinfo(_f_host, None, type=socket.SOCK_STREAM, flags=socket.AI_ALL)
-            if ipv6:
-                _f_ipv6 = [sockaddr[0] for family, *_, sockaddr in _f_ips if family == socket.AF_INET6][0]
-                settings.forward_url = forward_url.replace(f'://{settings.forward_host}', f'://[{_f_ipv6}]:{_f_port}')
-            else:
-                _f_ipv4 = [sockaddr[0] for family, *_, sockaddr in _f_ips if family == socket.AF_INET][0]
-                settings.forward_url = forward_url.replace(f'://{settings.forward_host}', f'://{_f_ipv4}:{_f_port}')
-        except Exception:
-            print('[W] Resolve FQDN failed, sending requests with FQDN directly.')
+        _url = urlparse(forward_url)
+        settings.forward_hosth = _url.hostname
+        settings.forward_hostn = _url.hostname
+        settings.forward_port = _url.port or (443 if _url.scheme == 'https' else 80)
+
+        if resolve:
+            _f_ipv4s, _f_ipv6s = get_ips(_url.hostname)
+            try:
+                if ipv6:
+                    _f_ipv6 = _f_ipv6s[0]
+                    settings.forward_url = forward_url.replace(
+                        f'://{_url.netloc}',
+                        f'://[{_f_ipv6}]:{settings.forward_port}',
+                        1
+                    )
+                    settings.forward_hostn = _f_ipv6
+                else:
+                    _f_ipv4 = _f_ipv4s[0]
+                    settings.forward_url = forward_url.replace(
+                        f'://{_url.netloc}',
+                        f'://{_f_ipv4}:{settings.forward_port}',
+                        1
+                    )
+                    settings.forward_hostn = _f_ipv4
+            except Exception:
+                print('[W] Resolve FQDN failed, sending requests with FQDN directly.')
+                settings.forward_url = forward_url
+        else:
             settings.forward_url = forward_url
+
     if method is not None:
         settings.method = method
     if forward_srv is not None:
@@ -69,10 +102,13 @@ def handle_connection(
         print('[I] Connection closed:', addr)
 
     _client = Session()
+    if no_verify:
+        _client.verify = False
     try:
         _res = _client.get(
             f'{settings.forward_url}/',
-            headers=base_headers()
+            headers=base_headers(),
+            timeout=10.0
         )
     except (KeyboardInterrupt, SystemExit):
         close()
@@ -109,7 +145,7 @@ def handle_connection(
         cookies=_cookie
     )
     try:
-        _res = _client.send(_req.prepare())
+        _res = _client.send(_req.prepare(), timeout=10.0)
     except (KeyboardInterrupt, SystemExit):
         close()
         return
@@ -147,7 +183,8 @@ def handle_connection(
             iqueue=_import_queue,
             sid=_sid,
             aes=_aes,
-            done=_done
+            done=_done,
+            no_verify=no_verify
         )
     else:
         _transfer_put = threading.Thread(
@@ -182,16 +219,16 @@ def handle_connection(
         method='GET',
         url=f'{settings.forward_url}/api/logout',
         headers={
-            'host': settings.forward_host,
-            'cache-control': 'no-cache',
-            'pragma': 'no-cache',
-            'connection': 'close',
-            'proxy-connection': 'close'
+            'Host': settings.forward_hosth,
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Connection': 'close',
+            'Proxy-Connection': 'close'
         },
         cookies=_cookie
     )
     try:
-        _client.send(_req.prepare())
+        _client.send(_req.prepare(), timeout=10.0)
         _client.close()
     except (KeyboardInterrupt, SystemExit):
         return
@@ -206,7 +243,6 @@ def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
         try:
             _d = conn.recv(settings.buffer_size)
         except Exception:
-            iqueue.put(None)
             equeue.put(b'')
             break
         # print('[D] Input:', _d)
@@ -217,6 +253,7 @@ def handle_input(conn: socket.socket, iqueue: queue.Queue, equeue: queue.Queue):
         equeue.put_nowait(None)
     except Exception:
         pass
+    iqueue.put(None)
     print('[D] Input closed.')
 
 
@@ -265,6 +302,9 @@ def handle_output(conn: socket.socket, iqueue: queue.Queue):
             break
     try:
         conn.sendall(b'')
+    except Exception:
+        pass
+    try:
         conn.shutdown(socket.SHUT_RDWR)
     except Exception:
         pass
@@ -292,6 +332,8 @@ def get_equeue(equeue: queue.Queue, aes: Crypto_AES, done: threading.Event):
         if _item is None:
             done.set()
             break
+        if len(_item) == 0:
+            done.set()
         tokenid += 1
         _id.append(str(tokenid))
 
@@ -341,19 +383,21 @@ def put_iqueue(iqueue: queue.Queue, data: dict[str, str], aes: Crypto_AES, done:
             break
 
 
+from websockets.sync.client import ClientConnection
+
+
 def _ws_send(
     equeue: queue.Queue,
-    client,
+    client: ClientConnection,
     aes: Crypto_AES,
     done: threading.Event
 ):
-    import json
-
+    print('[D] Websocket send thread started.')
     _body = {}
     while not done.is_set():
         _req_data = get_equeue(equeue, aes, done)
         if _req_data is None:
-            break  # set
+            break
         _body['tokenid'], _body['token'] = _req_data
         try:
             client.send(json.dumps(_body).encode())
@@ -363,26 +407,30 @@ def _ws_send(
             break
         # print('[D] Sent websocket:', _body)
     client.close()
+    print('[D] Websocket send thread closed.')
 
 
 def _ws_recv(
     iqueue: queue.Queue,
-    client,
+    client: ClientConnection,
     aes: Crypto_AES,
     done: threading.Event
 ):
-    import json
-
     def terminate():
         done.set()
         iqueue.put(None)
 
+    print('[D] Websocket receive thread started.')
     while not done.is_set():
         try:
-            _res = client.recv()
+            _res = client.recv(timeout=20.0)
             # print('[D] Received websocket:', _res)
         except Exception as identifier:
             print('[D] Receive websocket failed:', identifier)
+            terminate()
+            break
+
+        if len(_res) == 0:
             terminate()
             break
 
@@ -392,13 +440,16 @@ def _ws_recv(
             print('[E] Failed to parse response from session:', identifier)
             terminate()
             break
-        if _res_data.get('error', None) == 'Timeout':
+        if _res_data.get('Error', None) == 'Timeout':
             try:
                 client.send(b'{}')
             except Exception:
                 pass
         put_iqueue(iqueue, _res_data, aes, done)
+    else:
+        iqueue.put(None)
     client.close()
+    print('[D] Websocket receive thread closed.')
 
 
 def handle_ws(
@@ -406,9 +457,12 @@ def handle_ws(
     iqueue: queue.Queue,
     sid: str,
     aes: Crypto_AES,
-    done: threading.Event
+    done: threading.Event,
+    no_verify=False
 ):
+    import socks
     from websockets.sync.client import connect
+    import ssl
 
     print('[D] Websocket mode started.')
     _cookie = {}
@@ -419,18 +473,99 @@ def handle_ws(
         _cookie_text += f'{key}={_cookie[key]}; '
     _cookie_text = _cookie_text.strip().strip(';')
 
-    _f_schema = settings.forward_url.split('://')[0]
+    _http_proxy = getproxies().get('http', '')
+    _https_proxy = getproxies().get('https', _http_proxy)
+    if settings.forward_url.startswith('https'):
+        _proxy = urlparse(_https_proxy)
+    else:
+        _proxy = urlparse(_http_proxy)
+    if _proxy.hostname:
+        if _proxy.scheme.startswith('socks5'):
+            _p_type = socks.SOCKS5
+            _p_port = 1080
+        elif _proxy.scheme.startswith('socks4'):
+            _p_type = socks.SOCKS4
+            _p_port = 1080
+        elif _proxy.scheme == 'http':
+            _p_type = socks.HTTP
+            _p_port = 80
+        else:
+            print('[E] Proxy scheme not supported:', _proxy.scheme)
+            iqueue.put(None)
+            return
+        if _proxy.port:
+            _p_port = _proxy.port
+        print('[D] Using proxy:', f'{_proxy.scheme}://{_proxy.hostname}:{_p_port}')
+
+        try:
+            _sock = socket.socket(socket.AF_INET6)
+            _sock.connect((_proxy.hostname, _p_port))
+            _sock.shutdown(socket.SHUT_RDWR)
+            _sock.close()
+            _sock = socks.socksocket(socket.AF_INET6)
+        except Exception:
+            _sock = socks.socksocket(socket.AF_INET)
+        finally:
+            _p_user = _proxy.username
+            if _p_user is not None:
+                _p_user = unquote(_p_user)
+            _p_pass = _proxy.password
+            if _p_pass is not None:
+                _p_pass = unquote(_p_pass)
+            _sock.set_proxy(
+                _p_type,
+                _proxy.hostname,
+                _p_port,
+                username=_p_user,
+                password=_p_pass
+            )
+        try:
+            _sock.connect((settings.forward_hostn, settings.forward_port))
+        except Exception as identifier:
+            print('[E] Failed to connect to proxy:', identifier)
+            iqueue.put(None)
+            return
+        print('[D] Proxy connected.')
+    else:
+        print('[D] No proxy used.')
+        try:
+            _sock = socket.socket(socket.AF_INET6)
+            _sock.connect((settings.forward_hostn, settings.forward_port))
+        except Exception:
+            try:
+                _sock = socket.socket(socket.AF_INET)
+                _sock.connect((settings.forward_hostn, settings.forward_port))
+            except Exception as identifier:
+                print('[E] Failed to connect WebSocket to server:', identifier)
+                iqueue.put(None)
+                return
+
+    if settings.forward_url.startswith('https'):
+        _ssl_context = ssl.create_default_context()
+        if no_verify:
+            _ssl_context.check_hostname = False
+            _ssl_context.verify_mode = ssl.CERT_NONE
+    else:
+        _ssl_context = None
+
     try:
         _client = connect(
-            f'{_f_schema.replace('http', 'ws')}://{settings.forward_host}/api/session',
-            additional_headers={'cookie': _cookie_text},
-            compression=None
+            f'{settings.forward_url.replace('http', 'ws', 1).replace(
+                f'://{settings.forward_hostn}',
+                f'://{settings.forward_hosth}',
+                1
+            )}/api/session',
+            sock=_sock,
+            ssl_context=_ssl_context,
+            additional_headers={'Cookie': _cookie_text},
+            compression=None,
+            close_timeout=1.0
         )
     except Exception as identifier:
         print('[E] Connect websocket to session failed:', identifier)
         iqueue.put(None)
         return
-    if not _client.response.headers.get('set-cookie', '').startswith(f'sid={sid};'):
+    if not _client.response.headers.get('Set-Cookie', '').startswith(f'sid={sid};'):
         print('[E] Invalid sid in response from session.')
         iqueue.put(None)
         return
@@ -465,8 +600,14 @@ def _transfer(
         # content-type: application/json is auto provided
         json=None if method == 'GET' else body
     )
+
+    if cookies.get('tokenid', None) or body.get('tokenid', None):
+        _timeout = 10.0
+    else:
+        _timeout = 20.0
+
     try:
-        _res = client.send(_req.prepare())
+        _res = client.send(_req.prepare(), timeout=_timeout)
     except Exception as identifier:
         print('[E] Request to session failed:', identifier.args)
         terminate()
@@ -477,7 +618,7 @@ def _transfer(
             print('[W] Response from session invalid:', _res.status_code, 'retring...')
             time.sleep(0.5)
             try:
-                _res = client.send(_req.prepare())
+                _res = client.send(_req.prepare(), timeout=_timeout)
             except Exception as identifier:
                 print('[E] Request to session failed:', identifier.args)
                 terminate()
@@ -563,9 +704,11 @@ def client(
     host,
     port,
     forward_url=None,
+    resolve=False,
     ipv6=False,
     method=None,
     forward_srv=None,
+    no_verify=False,
     buffer_size=None,
     queue_size=None,
     reorder_limit=None
@@ -605,9 +748,11 @@ def client(
                 conn,
                 addr,
                 forward_url,
+                resolve,
                 ipv6,
                 method,
                 forward_srv,
+                no_verify,
                 buffer_size,
                 queue_size,
                 reorder_limit

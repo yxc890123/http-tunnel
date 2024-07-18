@@ -1,7 +1,9 @@
 class Config(object):
     def __init__(self) -> None:
-        self.forward_url = 'http://127.0.0.1'
-        self.forward_host = 'localhost'
+        self.forward_url = 'http://localhost'
+        self.forward_hostn = 'localhost'
+        self.forward_port = 80
+        self.forward_hosth = 'localhost'
         self.method = 'GET'
         self.forward_srv = '127.0.0.1:22'
         self.max_sessions = 10
