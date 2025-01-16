@@ -3,6 +3,8 @@ import sys, os
 import signal
 from getopt import getopt
 
+from .__init__ import __version__
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 exec_file = os.path.basename(sys.argv[0])
@@ -10,7 +12,7 @@ exec_file = os.path.basename(sys.argv[0])
 help_text = f'''http-tunnel
 
 Socket over HTTP.
-Version: 0.6
+Version: {__version__}
 
 Usage:
     {exec_file} -c [options]

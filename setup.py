@@ -1,8 +1,10 @@
 from setuptools import setup
 
+from http_tunnel import __version__
+
 setup(
     name='http-tunnel',
-    version='0.6.9',
+    version=__version__,
     description='HTTP tunneling tool.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',

@@ -11,16 +11,19 @@ import sys, os, time
 from .crypto import Crypto_AES, Crypto_RSA
 from .common import Config, find_packet
 
+from .__init__ import __version__
+
 settings = Config()
 
 
-def base_headers():
+def base_headers(close=False):
     return {
         'Host': settings.forward_hosth,
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        'Connection': 'keep-alive',
-        'Proxy-Connection': 'keep-alive'
+        'Connection': 'keep-alive' if not close else 'close',
+        'Proxy-Connection': 'keep-alive' if not close else 'close',
+        'User-Agent': f'python-http_tunnel/{__version__}'
     }
 
 
@@ -218,13 +221,7 @@ def handle_connection(
     _req = Request(
         method='GET',
         url=f'{settings.forward_url}/api/logout',
-        headers={
-            'Host': settings.forward_hosth,
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Connection': 'close',
-            'Proxy-Connection': 'close'
-        },
+        headers=base_headers(close=True),
         cookies=_cookie
     )
     try:
@@ -558,6 +555,7 @@ def handle_ws(
             sock=_sock,
             ssl_context=_ssl_context,
             additional_headers={'Cookie': _cookie_text},
+            user_agent_header=base_headers()['User-Agent'],
             compression=None,
             close_timeout=1.0
         )
